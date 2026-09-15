@@ -47,7 +47,16 @@ async function computeAutomaticDiscountCents(
         { active: true },
         { startsAt: { lte: now } },
         { OR: [{ endsAt: null }, { endsAt: { gte: now } }] },
-        { OR: [{ productId: product.id }, { categoryId: product.categoryId }] },
+        {
+          OR: [
+            { productId: product.id },
+            { categoryId: product.categoryId },
+            // Storewide automatic discount: scoped to neither a product nor
+            // a category, per the schema's "null = automatic, always
+            // applied within window" comment on Discount.code.
+            { productId: null, categoryId: null },
+          ],
+        },
       ],
     },
   });

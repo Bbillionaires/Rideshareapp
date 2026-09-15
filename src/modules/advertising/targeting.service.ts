@@ -162,8 +162,8 @@ async function filterByFrequencyCap<T extends AdCampaign>(
   viewerId: string,
   now: Date
 ): Promise<T[]> {
-  const results = await Promise.all(
-    campaigns.map(async (campaign) => {
+  const results: Array<T | null> = await Promise.all(
+    campaigns.map(async (campaign): Promise<T | null> => {
       if (!campaign.frequencyCapCount) return campaign;
 
       const since =
