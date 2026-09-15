@@ -109,6 +109,30 @@ npm run build && npm start
 
 `npm run typecheck` runs `tsc --noEmit` across the whole project.
 
+## Testing
+
+The test suite is integration-first: the financial logic lives almost
+entirely in Prisma queries and transactions, so mocking the database would
+mostly test the mocks. Tests run against a real, dedicated Postgres database
+(`rideshareapp_test` by default — never the dev database), truncated and
+reseeded between every test (`tests/helpers/db.ts`).
+
+```bash
+createdb rideshareapp_test   # once, or: psql -c "CREATE DATABASE rideshareapp_test;"
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/rideshareapp_test?schema=public" \
+  npx prisma migrate deploy
+npm test
+```
+
+Set `TEST_DATABASE_URL` (see `tests/env.ts`) to point at a different test
+database. Coverage focuses on the money-moving paths and their edge cases:
+EV bonus rule matching/stacking/funding-source reconciliation, the
+driver-to-rider resale flow's eligibility gates and commission/profit split,
+cumulative refund limits, discount validation, and consent-gated ad
+targeting — including regression tests for every bug found in code review
+(sponsorship contribution mismatch, cumulative over-refund, unlogged
+platform losses, unclamped discounts).
+
 ## Notes / known gaps
 
 - `dispatch` and the fare formula in `pricing` are intentionally minimal —
