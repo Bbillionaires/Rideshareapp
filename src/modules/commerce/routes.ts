@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { OrderStatus, ProductStatus } from "@prisma/client";
 import { asyncHandler } from "../../lib/http";
 import * as CatalogService from "./catalog.service";
 import * as OrdersService from "./orders.service";
@@ -55,7 +56,7 @@ commerceRouter.get(
     const { status, categoryId, resaleEligible } = req.query;
     res.json(
       await CatalogService.listProducts({
-        status: status as never,
+        status: status as ProductStatus | undefined,
         categoryId: categoryId as string | undefined,
         resaleEligible:
           resaleEligible === undefined ? undefined : resaleEligible === "true",
@@ -200,7 +201,7 @@ commerceRouter.get(
     res.json(
       await OrdersService.viewOrders({
         buyerDriverId: buyerDriverId as string | undefined,
-        status: status as never,
+        status: status as OrderStatus | undefined,
         startDate: parseDate(startDate),
         endDate: parseDate(endDate),
       })
