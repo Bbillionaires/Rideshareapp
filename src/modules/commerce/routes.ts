@@ -126,6 +126,52 @@ commerceRouter.get(
 );
 
 // ----------------------------------------------------------------------------
+// CommissionRule (driver-to-rider resale commission)
+// ----------------------------------------------------------------------------
+
+commerceRouter.post(
+  "/commission-rules",
+  asyncHandler(async (req, res) => {
+    const body = { ...req.body };
+    if (body.effectiveStart) body.effectiveStart = new Date(body.effectiveStart);
+    if (body.effectiveEnd) body.effectiveEnd = new Date(body.effectiveEnd);
+    const rule = await CatalogService.createCommissionRule(body);
+    res.status(201).json(rule);
+  })
+);
+
+commerceRouter.get(
+  "/commission-rules",
+  asyncHandler(async (req, res) => {
+    const { productId, categoryId, active } = req.query;
+    res.json(
+      await CatalogService.listCommissionRules({
+        productId: productId as string | undefined,
+        categoryId: categoryId as string | undefined,
+        active: active === undefined ? undefined : active === "true",
+      })
+    );
+  })
+);
+
+commerceRouter.patch(
+  "/commission-rules/:id",
+  asyncHandler(async (req, res) => {
+    const body = { ...req.body };
+    if (body.effectiveStart) body.effectiveStart = new Date(body.effectiveStart);
+    if (body.effectiveEnd) body.effectiveEnd = new Date(body.effectiveEnd);
+    res.json(await CatalogService.updateCommissionRule(req.params.id, body));
+  })
+);
+
+commerceRouter.post(
+  "/commission-rules/:id/deactivate",
+  asyncHandler(async (req, res) => {
+    res.json(await CatalogService.deactivateCommissionRule(req.params.id));
+  })
+);
+
+// ----------------------------------------------------------------------------
 // Bundle
 // ----------------------------------------------------------------------------
 

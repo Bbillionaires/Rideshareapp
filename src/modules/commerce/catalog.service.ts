@@ -1,5 +1,6 @@
 import {
   Bundle,
+  CommissionType,
   DiscountType,
   Product,
   ProductCategory,
@@ -293,6 +294,16 @@ export async function createDiscount(input: CreateDiscountInput) {
     const category = await prisma.productCategory.findUnique({ where: { id: input.categoryId } });
     if (!category) notFound(`ProductCategory ${input.categoryId} not found`);
   }
+  // Bound `value` the same way ev-incentives bounds its own rate fields —
+  // an out-of-range PERCENTAGE (e.g. 1.5 meant as "150%") would otherwise
+  // let computeAutomaticDiscountCents discount a line for more than its
+  // total, driving the order total negative.
+  if (input.type === DiscountType.PERCENTAGE && (input.value < 0 || input.value > 1)) {
+    badRequest("A PERCENTAGE discount's value must be between 0 and 1 (e.g. 0.15 for 15%)");
+  }
+  if (input.type === DiscountType.FIXED_AMOUNT && input.value < 0) {
+    badRequest("A FIXED_AMOUNT discount's value (cents) must be non-negative");
+  }
 
   return prisma.discount.create({
     data: {
@@ -418,4 +429,114 @@ export async function getInventoryStock(productId: string) {
     where: { productId },
     include: { location: true },
   });
+}
+
+// ----------------------------------------------------------------------------
+// CommissionRule — admin-configurable driver commission for the
+// driver-to-rider resale flow (driver-sale.service.ts). Falls back from a
+// product-specific rule to a category-level rule to a hardcoded platform
+// default (20% of gross margin) when nothing matches — see
+// driver-sale.service.ts's DEFAULT_COMMISSION_RATE.
+// ----------------------------------------------------------------------------
+
+export interface CreateCommissionRuleInput {
+  productId?: string;
+  categoryId?: string;
+  type: CommissionType;
+  value: number;
+  effectiveStart?: Date;
+  effectiveEnd?: Date;
+}
+
+function validateCommissionRuleInput(input: Partial<CreateCommissionRuleInput>) {
+  if (!input.productId && !input.categoryId) {
+    badRequest("A CommissionRule must scope to either a productId or a categoryId");
+  }
+  if (input.type === CommissionType.PERCENTAGE && input.value != null && (input.value < 0 || input.value > 1)) {
+    // Bounded to [0,1] because driver-sale.service.ts computes this rate
+    // against gross margin (sale price - platform cost); a value above 1
+    // would let driverCommissionCents exceed the margin, silently costing
+    // the platform money on every matching sale.
+    badRequest("A PERCENTAGE CommissionRule's value must be between 0 and 1 (e.g. 0.2 for 20% of gross margin)");
+  }
+  if (input.type === CommissionType.FLAT && input.value != null && input.value < 0) {
+    badRequest("A FLAT CommissionRule's value (cents per unit) must be non-negative");
+  }
+  if (input.effectiveEnd && input.effectiveStart && input.effectiveEnd < input.effectiveStart) {
+    badRequest("effectiveEnd must not be before effectiveStart");
+  }
+}
+
+export async function createCommissionRule(input: CreateCommissionRuleInput) {
+  validateCommissionRuleInput(input);
+  if (input.productId) {
+    const product = await prisma.product.findUnique({ where: { id: input.productId } });
+    if (!product) notFound(`Product ${input.productId} not found`);
+  }
+  if (input.categoryId) {
+    const category = await prisma.productCategory.findUnique({ where: { id: input.categoryId } });
+    if (!category) notFound(`ProductCategory ${input.categoryId} not found`);
+  }
+
+  return prisma.commissionRule.create({
+    data: {
+      productId: input.productId ?? null,
+      categoryId: input.categoryId ?? null,
+      type: input.type,
+      value: input.value,
+      effectiveStart: input.effectiveStart ?? new Date(),
+      effectiveEnd: input.effectiveEnd ?? null,
+    },
+  });
+}
+
+export interface ListCommissionRulesFilters {
+  productId?: string;
+  categoryId?: string;
+  active?: boolean;
+}
+
+export async function listCommissionRules(filters: ListCommissionRulesFilters = {}) {
+  return prisma.commissionRule.findMany({
+    where: {
+      productId: filters.productId,
+      categoryId: filters.categoryId,
+      active: filters.active,
+    },
+    orderBy: { effectiveStart: "desc" },
+  });
+}
+
+export async function updateCommissionRule(
+  id: string,
+  input: Partial<Pick<CreateCommissionRuleInput, "type" | "value" | "effectiveStart" | "effectiveEnd">> & {
+    active?: boolean;
+  }
+) {
+  const existing = await prisma.commissionRule.findUnique({ where: { id } });
+  if (!existing) notFound(`CommissionRule ${id} not found`);
+
+  validateCommissionRuleInput({
+    type: input.type ?? existing!.type,
+    value: input.value ?? existing!.value.toNumber(),
+    effectiveStart: input.effectiveStart ?? existing!.effectiveStart,
+    effectiveEnd: input.effectiveEnd !== undefined ? input.effectiveEnd : existing!.effectiveEnd ?? undefined,
+  });
+
+  return prisma.commissionRule.update({
+    where: { id },
+    data: {
+      ...(input.type !== undefined ? { type: input.type } : {}),
+      ...(input.value !== undefined ? { value: input.value } : {}),
+      ...(input.effectiveStart !== undefined ? { effectiveStart: input.effectiveStart } : {}),
+      ...(input.effectiveEnd !== undefined ? { effectiveEnd: input.effectiveEnd } : {}),
+      ...(input.active !== undefined ? { active: input.active } : {}),
+    },
+  });
+}
+
+export async function deactivateCommissionRule(id: string) {
+  const existing = await prisma.commissionRule.findUnique({ where: { id } });
+  if (!existing) notFound(`CommissionRule ${id} not found`);
+  return prisma.commissionRule.update({ where: { id }, data: { active: false } });
 }

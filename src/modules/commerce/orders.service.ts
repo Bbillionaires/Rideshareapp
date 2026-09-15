@@ -67,9 +67,13 @@ async function computeAutomaticDiscountCents(
   let bestDiscountId: string | null = null;
   for (const d of usable) {
     const rate = d.value.toNumber();
+    // Defense in depth: catalog.service.ts's createDiscount already bounds
+    // PERCENTAGE to [0,1] at write time, but clamp here too (mirroring the
+    // FIXED_AMOUNT branch's existing clamp) so a discount can never reduce
+    // a line below zero regardless of how it was stored.
     const amount =
       d.type === DiscountType.PERCENTAGE
-        ? applyRate(lineTotalCents, rate)
+        ? Math.min(lineTotalCents, applyRate(lineTotalCents, rate))
         : Math.min(lineTotalCents, Math.round(rate));
     if (amount > bestDiscountCents) {
       bestDiscountCents = amount;
@@ -310,10 +314,20 @@ export async function issueRefund(
       issuedBy,
     });
 
+    // Mirror payments/service.ts's cumulative check: an order can be
+    // refunded across multiple calls, so compare the running total refunded
+    // against this payment, not just this call's amount, against the
+    // order's total.
+    const refundedTotal = await tx.refund.aggregate({
+      where: { paymentId: payment!.id },
+      _sum: { amountCents: true },
+    });
+    const totalRefundedCents = refundedTotal._sum.amountCents ?? 0;
+
     const updatedOrder = await tx.order.update({
       where: { id: orderId },
       data: {
-        status: amountCents >= order!.totalCents ? OrderStatus.REFUNDED : order!.status,
+        status: totalRefundedCents >= order!.totalCents ? OrderStatus.REFUNDED : order!.status,
       },
     });
 

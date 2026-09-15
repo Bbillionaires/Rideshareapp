@@ -70,6 +70,24 @@ export async function issueRefund(tx: PrismaTx, input: IssueRefundInput): Promis
   const payment = await tx.payment.findUnique({ where: { id: input.paymentId } });
   if (!payment) notFound(`Payment ${input.paymentId} not found`);
 
+  // Guard against cumulative over-refund: a payment can be refunded across
+  // several calls (e.g. a partial refund followed by a later top-up), so we
+  // must check the running total already issued, not just this call's
+  // amount against the original payment.
+  const priorRefunds = await tx.refund.aggregate({
+    where: { paymentId: payment!.id },
+    _sum: { amountCents: true },
+  });
+  const alreadyRefundedCents = priorRefunds._sum.amountCents ?? 0;
+  const totalRefundedCents = alreadyRefundedCents + input.amountCents;
+  if (totalRefundedCents > payment!.amountCents) {
+    badRequest(
+      `Refund of ${input.amountCents} would bring total refunds on payment ${payment!.id} to ` +
+        `${totalRefundedCents}, exceeding its amount of ${payment!.amountCents} ` +
+        `(${alreadyRefundedCents} already refunded)`
+    );
+  }
+
   const refund = await tx.refund.create({
     data: {
       paymentId: payment!.id,
@@ -81,7 +99,7 @@ export async function issueRefund(tx: PrismaTx, input: IssueRefundInput): Promis
   });
 
   const newStatus =
-    input.amountCents >= payment!.amountCents
+    totalRefundedCents >= payment!.amountCents
       ? PaymentStatus.REFUNDED
       : PaymentStatus.PARTIALLY_REFUNDED;
 

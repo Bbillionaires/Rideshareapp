@@ -220,6 +220,23 @@ export async function createDriverSale(input: CreateDriverSaleInput): Promise<Dr
         amountCents: platformProfitCents,
         description: `Platform profit on sale ${sale.id}`,
       });
+    } else if (platformProfitCents < 0) {
+      // A misconfigured (or since-changed) CommissionRule can pay the driver
+      // more than the sale's gross margin. That should be prevented at the
+      // source (see catalog.service.ts's validateCommissionRuleInput, which
+      // bounds PERCENTAGE to [0,1] of margin), but if it ever happens anyway
+      // the loss must still be traceable in the ledger rather than silently
+      // dropped — post it as a PLATFORM debit under the same entry type.
+      await postLedgerEntry(tx, {
+        entryType: "DRIVER_SALE_PLATFORM_PROFIT",
+        sourceModule: "COMMERCE",
+        direction: "DEBIT",
+        partyType: "PLATFORM",
+        rideId: input.rideId,
+        driverSaleId: sale.id,
+        amountCents: Math.abs(platformProfitCents),
+        description: `Platform loss on sale ${sale.id} (driver commission exceeded gross margin)`,
+      });
     }
 
     return sale;

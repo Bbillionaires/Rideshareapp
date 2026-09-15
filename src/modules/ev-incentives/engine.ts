@@ -3,7 +3,7 @@ import { prisma, PrismaTx } from "../../lib/prisma";
 import { postDriverEarningsLine, postLedgerEntry, postRiderReceiptLine } from "../../lib/ledger";
 import { applyRate, sumCents } from "../../lib/money";
 import { isVehicleEvEligible } from "./eligibility";
-import { recordSponsorshipContribution } from "../sponsorships/service";
+import { computeProgramContributionCents, recordSponsorshipContribution } from "../sponsorships/service";
 
 /**
  * EV_INCENTIVES rule engine.
@@ -165,6 +165,44 @@ function computeFundingSplit(rule: EvCompensationRule, totalAmountCents: number)
   }
 }
 
+/**
+ * The rule's own flat/percentage/per-mile config determines the SIZE of the
+ * sponsor's naive share (via computeFundingSplit above), but the actual rate
+ * a sponsor is contracted to pay lives on their SponsorshipProgram, not on
+ * this rule — those two numbers can disagree (e.g. the rule computes a
+ * $2.50 bonus but the program only contracted $2.00/trip). This reconciles
+ * them: the program's contracted rate always wins for what's billed to the
+ * sponsor, the rider's share (if any, from an admin's SPLIT config) is left
+ * untouched, and the platform absorbs whatever difference is left over so
+ * the three shares always sum back to the rule's totalAmountCents exactly —
+ * a shortfall or an over-generous nominal rate never goes unaccounted for.
+ */
+function reconcileSponsorFunding(
+  funding: FundingSplit,
+  totalAmountCents: number,
+  contractedSponsorCents: number,
+  ruleId: string
+): FundingSplit {
+  if (contractedSponsorCents === funding.fundedBySponsorCents) return funding;
+
+  const maxSponsorCents = Math.max(0, totalAmountCents - funding.fundedByRiderCents);
+  const clampedSponsorCents = Math.min(Math.max(0, contractedSponsorCents), maxSponsorCents);
+  const newPlatformCents = totalAmountCents - funding.fundedByRiderCents - clampedSponsorCents;
+
+  console.warn(
+    `EV_INCENTIVES: rule ${ruleId} attributed ${funding.fundedBySponsorCents} cents to the sponsor, ` +
+      `but the linked SponsorshipProgram's contracted rate computes to ${contractedSponsorCents} cents; ` +
+      `billing the sponsor ${clampedSponsorCents} cents (the program's rate) and adjusting the ` +
+      `platform's share to ${newPlatformCents} cents so the total still equals the driver's ${totalAmountCents}-cent bonus.`
+  );
+
+  return {
+    fundedBySponsorCents: clampedSponsorCents,
+    fundedByRiderCents: funding.fundedByRiderCents,
+    fundedByPlatformCents: newPlatformCents,
+  };
+}
+
 // ----------------------------------------------------------------------------
 // Ride-finalizer hook
 // ----------------------------------------------------------------------------
@@ -221,8 +259,27 @@ async function applyOneRule(
   const amounts = computeRuleAmount(rule, driverBaseEarningsCents, distanceMiles);
   if (amounts.totalAmountCents <= 0) return; // nothing to pay out for this rule
 
-  const funding = computeFundingSplit(rule, amounts.totalAmountCents);
+  let funding = computeFundingSplit(rule, amounts.totalAmountCents);
   if (!funding) return; // misconfigured rule; warning already logged, skip without throwing
+
+  // Reconcile the rule's naive sponsor guess against the program's own
+  // contracted rate before creating any row, so everything we persist below
+  // (EvBonusLineItem, ledger entries, the contribution itself) reflects the
+  // authoritative, reconciled split.
+  let sponsorshipProgram = null;
+  if (funding.fundedBySponsorCents > 0) {
+    sponsorshipProgram = await tx.sponsorshipProgram.findUnique({
+      where: { id: rule.sponsorshipProgramId as string },
+    });
+    if (!sponsorshipProgram) {
+      console.warn(
+        `EV_INCENTIVES: rule ${rule.id} references sponsorship program ${rule.sponsorshipProgramId}, which no longer exists; skipping rule`
+      );
+      return;
+    }
+    const contractedSponsorCents = computeProgramContributionCents(sponsorshipProgram, driverBaseEarningsCents);
+    funding = reconcileSponsorFunding(funding, amounts.totalAmountCents, contractedSponsorCents, rule.id);
+  }
 
   const lineItem = await tx.evBonusLineItem.create({
     data: {

@@ -1,6 +1,7 @@
-import { SponsorshipContribution, SponsorshipProgramStatus } from "@prisma/client";
+import { SponsorshipContribution, SponsorshipProgram, SponsorshipProgramStatus } from "@prisma/client";
 import { prisma, PrismaTx } from "../../lib/prisma";
 import { postLedgerEntry } from "../../lib/ledger";
+import { applyRate } from "../../lib/money";
 import { badRequest, notFound } from "../../lib/http";
 
 /**
@@ -164,6 +165,32 @@ export async function listContributionsForProgram(programId: string) {
 }
 
 // ----------------------------------------------------------------------------
+// Contribution amount — the program's own contracted rate is authoritative.
+// ----------------------------------------------------------------------------
+
+/**
+ * The amount a program has actually contracted to contribute for one
+ * qualifying trip, per its own contributionType/contributionAmountCents/
+ * contributionPercentage — this is what a sponsor is billed, regardless of
+ * what any calling module's own bonus formula might otherwise suggest.
+ * Callers (e.g. EV_INCENTIVES) must use this to derive the sponsor's share
+ * rather than assuming their own computed bonus total is what the sponsor
+ * owes; those two numbers are allowed to differ (see engine.ts, which
+ * reconciles the difference onto the platform's share and logs a warning).
+ */
+export function computeProgramContributionCents(
+  program: Pick<SponsorshipProgram, "contributionType" | "contributionAmountCents" | "contributionPercentage">,
+  driverBaseEarningsCents: number
+): number {
+  if (program.contributionType === "FLAT_PER_TRIP") {
+    return program.contributionAmountCents ?? 0;
+  }
+  return program.contributionPercentage
+    ? applyRate(driverBaseEarningsCents, program.contributionPercentage.toNumber())
+    : 0;
+}
+
+// ----------------------------------------------------------------------------
 // Contribution recording — called by EV_INCENTIVES (and any future module)
 // inside the caller's own transaction.
 // ----------------------------------------------------------------------------
@@ -172,6 +199,14 @@ export interface RecordContributionInput {
   programId: string;
   rideId: string;
   driverId: string;
+  /**
+   * Must be derived from computeProgramContributionCents (the program's own
+   * contracted rate) — never from another module's independently-computed
+   * bonus total. This function trusts its caller for the amount but not for
+   * which formula produced it; callers exist precisely so different bonus
+   * mechanisms (EV rules today, others later) can all bill through the same
+   * program contract.
+   */
   amountCents: number;
 }
 
