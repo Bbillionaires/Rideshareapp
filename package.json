@@ -1,0 +1,39 @@
+{
+  "name": "rideshareapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rideshare platform backend: rides, dispatch, pricing, EV incentives, commerce, driver inventory, advertising, ad consent, sponsorships, payments, and driver earnings ledger.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "jest --runInBand",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "lint": "eslint 'src/**/*.ts'"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.19.1",
+    "express": "^4.19.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.14.15",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0",
+    "prisma": "^5.19.1",
+    "ts-jest": "^29.2.4",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.4"
+  },
+  "prisma": {
+    "seed": "ts-node prisma/seed.ts"
+  }
+}
