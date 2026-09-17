@@ -1,0 +1,1453 @@
+// ============================================================================
+// RideshareApp data model
+//
+// Organized into bounded modules per architecture requirement. Modules only
+// reference each other by id (never by embedding another module's money
+// fields), and every dollar that moves is represented exactly once in
+// LedgerEntry (module: DRIVER_EARNINGS) tagged with its originating module
+// and entry type. Do not add generic "amount" fields to cross-module
+// relations — route money through LedgerEntry instead.
+//
+// Module sections:
+//   GEOGRAPHY        shared by RIDES, EV_INCENTIVES, ADVERTISING
+//   IDENTITY         drivers, riders, vehicles (shared reference data)
+//   RIDES            trip lifecycle
+//   DISPATCH         offer/acceptance log (kept minimal; not a focus area)
+//   PRICING          fare computation per ride
+//   EV_INCENTIVES    admin-configurable EV compensation engine
+//   SPONSORSHIPS     business-sponsored driver incentive programs
+//   COMMERCE         driver store catalog, orders, driver-to-rider resale
+//   DRIVER_INVENTORY per-driver on-hand stock for resale
+//   PAYMENTS         generic payment/refund processing
+//   ADVERTISING      campaigns, creatives, targeting, analytics
+//   AD_CONSENT       advertising consent records (distinct from ToS)
+//   THERAPY_RIDES    licensed-therapist ride-along sessions (separate consent,
+//                    therapist-vetted route safety mechanic, multi-payer fees)
+//   DRIVER_EARNINGS  the append-only financial ledger + driver-facing views
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// GEOGRAPHY
+// ----------------------------------------------------------------------------
+
+model Market {
+  id        String   @id @default(cuid())
+  name      String   @unique // e.g. "Jacksonville"
+  code      String   @unique // e.g. "JAX"
+  timezone  String   @default("America/New_York")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  zones             Zone[]
+  vehicles          Vehicle[]
+  rides             Ride[]
+  evRules           EvCompensationRule[]
+  sponsorPrograms   SponsorshipProgram[]
+  adTargetRules     AdTargetRule[]
+  onlineSessions    DriverOnlineSession[]
+  therapySessions   TherapySession[]
+
+  @@map("markets")
+}
+
+enum ZoneColor {
+  RED
+  GREEN
+  BLUE
+  YELLOW
+  BROWN
+}
+
+model Zone {
+  id        String    @id @default(cuid())
+  marketId  String
+  market    Market    @relation(fields: [marketId], references: [id])
+  name      String // e.g. "Northside"
+  color     ZoneColor
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+
+  zipMappings        ZipZoneMapping[]
+  rides              Ride[]
+  adTargetRules      AdTargetRule[]
+  therapistSafeRoutes TherapistSafeRoute[]
+
+  @@unique([marketId, name])
+  @@map("zones")
+}
+
+// A zip can only belong to one zone at a time; kept as its own table (rather
+// than a bare column on Zone) because zip-to-zone assignment changes
+// independently of the zone definition itself.
+model ZipZoneMapping {
+  id        String   @id @default(cuid())
+  zip       String
+  zoneId    String
+  zone      Zone     @relation(fields: [zoneId], references: [id])
+  marketId  String
+  createdAt DateTime @default(now())
+
+  @@unique([zip])
+  @@map("zip_zone_mappings")
+}
+
+model ServiceType {
+  id        String   @id @default(cuid())
+  code      String   @unique // e.g. STANDARD, XL, PREMIUM
+  name      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  rides           Ride[]
+  evRules         EvCompensationRule[]
+  sponsorProgs    SponsorshipProgram[]
+  therapySessions TherapySession[]
+
+  @@map("service_types")
+}
+
+// ----------------------------------------------------------------------------
+// IDENTITY
+// ----------------------------------------------------------------------------
+
+model Driver {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  status    String   @default("ACTIVE") // ACTIVE, SUSPENDED, DEACTIVATED
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  vehicles         Vehicle[]
+  rides            Ride[]
+  onlineSessions   DriverOnlineSession[]
+  rideOffers       RideOffer[]
+  inventoryItems   DriverInventoryItem[]
+  storeOrders      Order[]
+  sales            DriverSale[]
+  adConsents       AdConsentRecord[]         @relation("DriverAdConsent")
+  earningsLines    DriverEarningsLine[]
+  ledgerEntries    LedgerEntry[]             @relation("DriverLedgerParty")
+
+  @@map("drivers")
+}
+
+enum FuelType {
+  GAS
+  HYBRID
+  PHEV
+  EV
+}
+
+enum VehicleApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// EV eligibility for compensation purposes is ALWAYS derived from this
+// approved vehicle record (fuelType == EV && approvalStatus == APPROVED),
+// never from a driver-selected flag. See EvEligibilityService.
+model Vehicle {
+  id             String                 @id @default(cuid())
+  driverId       String
+  driver         Driver                 @relation(fields: [driverId], references: [id])
+  marketId       String
+  market         Market                 @relation(fields: [marketId], references: [id])
+  make           String
+  model          String
+  year           Int
+  plate          String
+  fuelType       FuelType
+  approvalStatus VehicleApprovalStatus  @default(PENDING)
+  verifiedAt     DateTime?
+  verifiedBy     String? // admin user id
+  active         Boolean                @default(true)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  rides            Ride[]
+  onlineSessions   DriverOnlineSession[]
+  chargingSessions  ChargingSession[]
+
+  @@index([driverId])
+  @@map("vehicles")
+}
+
+model Rider {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+
+  rides                 Ride[]
+  purchases             DriverSale[]
+  adConsents            AdConsentRecord[] @relation("RiderAdConsent")
+  therapyConsentRecords TherapyConsentRecord[]
+  therapySessions       TherapySession[]
+
+  @@map("riders")
+}
+
+// ----------------------------------------------------------------------------
+// RIDES
+// ----------------------------------------------------------------------------
+
+enum RideStatus {
+  REQUESTED
+  ACCEPTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum CancelledBy {
+  RIDER
+  DRIVER
+  SYSTEM
+}
+
+model Ride {
+  id             String      @id @default(cuid())
+  riderId        String
+  rider          Rider       @relation(fields: [riderId], references: [id])
+  driverId       String?
+  driver         Driver?     @relation(fields: [driverId], references: [id])
+  vehicleId      String? // snapshot of the vehicle actually used, for EV eligibility at time of trip
+  vehicle        Vehicle?    @relation(fields: [vehicleId], references: [id])
+  marketId       String
+  market         Market      @relation(fields: [marketId], references: [id])
+  zoneId         String? // pickup zone
+  zone           Zone?       @relation(fields: [zoneId], references: [id])
+  pickupZip      String?
+  serviceTypeId  String
+  serviceType    ServiceType @relation(fields: [serviceTypeId], references: [id])
+  status         RideStatus  @default(REQUESTED)
+  distanceMiles  Decimal?    @db.Decimal(8, 2)
+  durationMinutes Int?
+  requestedAt    DateTime    @default(now())
+  acceptedAt     DateTime?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  cancelledAt    DateTime?
+  cancelledBy    CancelledBy?
+  cancelReason   String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  offers            RideOffer[]
+  fare              RideFare?
+  evBonusLineItems  EvBonusLineItem[]
+  sponsorContribs   SponsorshipContribution[]
+  driverSales       DriverSale[]
+  ledgerEntries     LedgerEntry[]
+  earningsLines     DriverEarningsLine[]
+  receiptLines      RiderReceiptLine[]
+  therapySession    TherapySession?
+
+  @@index([driverId])
+  @@index([riderId])
+  @@index([status])
+  @@map("rides")
+}
+
+// ----------------------------------------------------------------------------
+// DISPATCH (kept minimal — offer/response log only)
+// ----------------------------------------------------------------------------
+
+enum RideOfferResponse {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+model RideOffer {
+  id           String            @id @default(cuid())
+  rideId       String
+  ride         Ride              @relation(fields: [rideId], references: [id])
+  driverId     String
+  driver       Driver            @relation(fields: [driverId], references: [id])
+  offeredAt    DateTime          @default(now())
+  respondedAt  DateTime?
+  response     RideOfferResponse @default(PENDING)
+
+  @@index([driverId])
+  @@map("ride_offers")
+}
+
+// Online/available time, used for utilization and EV vs non-EV analytics.
+model DriverOnlineSession {
+  id              String    @id @default(cuid())
+  driverId        String
+  driver          Driver    @relation(fields: [driverId], references: [id])
+  vehicleId       String?
+  vehicle         Vehicle?  @relation(fields: [vehicleId], references: [id])
+  marketId        String
+  market          Market    @relation(fields: [marketId], references: [id])
+  startedAt       DateTime
+  endedAt         DateTime?
+  durationMinutes Int?
+
+  @@index([driverId])
+  @@map("driver_online_sessions")
+}
+
+// Optional, only populated where telematics/manual entry makes it measurable.
+model ChargingSession {
+  id              String    @id @default(cuid())
+  vehicleId       String
+  vehicle         Vehicle   @relation(fields: [vehicleId], references: [id])
+  startedAt       DateTime
+  endedAt         DateTime?
+  durationMinutes Int?
+  source          String    @default("MANUAL") // MANUAL, TELEMATICS
+  notes           String?
+
+  @@index([vehicleId])
+  @@map("charging_sessions")
+}
+
+// ----------------------------------------------------------------------------
+// PRICING
+// ----------------------------------------------------------------------------
+
+// One fare computation per ride. Driver's EV supplement and sponsored bonus
+// are NOT stored here — they live in EV_INCENTIVES / SPONSORSHIPS and are
+// only summed with driverBaseEarnings at read time (see DriverEarningsService)
+// so pricing never needs to know those modules exist.
+model RideFare {
+  id                    String   @id @default(cuid())
+  rideId                String   @unique
+  ride                  Ride     @relation(fields: [rideId], references: [id])
+  currency              String   @default("USD")
+  baseFareCents         Int
+  distanceFareCents     Int
+  timeFareCents         Int
+  surgeMultiplier       Decimal  @default(1.0) @db.Decimal(4, 2)
+  subtotalFareCents     Int // what the rider is charged for the ride itself, pre-add-ons
+  platformServiceFeeCents Int
+  riderTotalChargeCents Int
+  driverBaseEarningsCents Int // "standard driver earnings" before EV/sponsorship
+  computedAt            DateTime @default(now())
+
+  @@map("ride_fares")
+}
+
+// ----------------------------------------------------------------------------
+// EV_INCENTIVES
+// ----------------------------------------------------------------------------
+
+enum EvFundingSource {
+  PLATFORM
+  RIDER
+  SPONSOR
+  SPLIT
+}
+
+// Admin-configurable rule. A rule's bonus amount is the sum of whichever
+// components are set (flat + percentage*driverBaseEarnings + perMile*miles),
+// floored by minimumBonusAmountCents when set. Rules scope by market and/or
+// service type (null = applies to all). Promotional rules stack additively
+// on top of the single best-matching standard rule; see EvBonusEngine.
+model EvCompensationRule {
+  id                     String          @id @default(cuid())
+  name                   String
+  description            String?
+  marketId               String? // null = all markets
+  market                 Market?         @relation(fields: [marketId], references: [id])
+  serviceTypeId          String? // null = all service types
+  serviceType            ServiceType?    @relation(fields: [serviceTypeId], references: [id])
+  flatAmountCents        Int?
+  percentageRate         Decimal?        @db.Decimal(6, 4) // e.g. 0.0800 = 8%
+  perMileAmountCents     Int?
+  minimumBonusAmountCents Int?
+  fundingSource          EvFundingSource @default(PLATFORM)
+  splitConfig            Json? // e.g. {"platform":0.5,"rider":0.5} or {"platform":0.5,"sponsor":0.5}, required when fundingSource = SPLIT
+  sponsorshipProgramId   String? // required when fundingSource involves SPONSOR (direct or via split)
+  sponsorshipProgram     SponsorshipProgram? @relation(fields: [sponsorshipProgramId], references: [id])
+  isPromotional          Boolean         @default(false)
+  priority               Int             @default(0) // higher wins among equally-specific matches
+  effectiveStartDate     DateTime
+  effectiveEndDate       DateTime?
+  active                 Boolean         @default(true)
+  createdBy              String?
+  createdAt              DateTime        @default(now())
+  updatedAt              DateTime        @updatedAt
+
+  lineItems EvBonusLineItem[]
+
+  @@index([marketId, serviceTypeId, active])
+  @@map("ev_compensation_rules")
+}
+
+// One row per rule applied to a given ride (a base rule plus zero or more
+// stacked promotional rules). This is the authoritative record shown on both
+// the rider receipt and the driver earnings ledger as the "EV component."
+model EvBonusLineItem {
+  id                       String          @id @default(cuid())
+  rideId                   String
+  ride                     Ride            @relation(fields: [rideId], references: [id])
+  ruleId                   String
+  rule                     EvCompensationRule @relation(fields: [ruleId], references: [id])
+  ruleNameSnapshot         String
+  isPromotional            Boolean
+  flatComponentCents       Int             @default(0)
+  percentageComponentCents Int             @default(0)
+  perMileComponentCents    Int             @default(0)
+  minimumFloorAppliedCents Int? // set when the floor overrode the summed components
+  totalAmountCents         Int
+  fundingSource            EvFundingSource
+  fundedByPlatformCents    Int             @default(0)
+  fundedByRiderCents       Int             @default(0)
+  fundedBySponsorCents     Int             @default(0)
+  sponsorshipContributionId String?
+  sponsorshipContribution  SponsorshipContribution? @relation(fields: [sponsorshipContributionId], references: [id])
+  createdAt                DateTime        @default(now())
+
+  ledgerEntries LedgerEntry[]
+  earningsLines DriverEarningsLine[]
+  receiptLines  RiderReceiptLine[]
+
+  @@index([rideId])
+  @@map("ev_bonus_line_items")
+}
+
+// ----------------------------------------------------------------------------
+// SPONSORSHIPS
+// ----------------------------------------------------------------------------
+
+model Sponsor {
+  id           String   @id @default(cuid())
+  name         String // e.g. "Local EV Dealership"
+  contactEmail String?
+  status       String   @default("ACTIVE")
+  createdAt    DateTime @default(now())
+
+  programs        SponsorshipProgram[]
+  therapySessions TherapySession[]
+
+  @@map("sponsors")
+}
+
+enum SponsorshipContributionType {
+  FLAT_PER_TRIP
+  PERCENTAGE
+}
+
+enum SponsorshipProgramStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ENDED
+}
+
+model SponsorshipProgram {
+  id                     String                      @id @default(cuid())
+  sponsorId              String
+  sponsor                Sponsor                     @relation(fields: [sponsorId], references: [id])
+  name                   String // e.g. "EV DRIVER BONUS — Sponsored by Acme"
+  description            String?
+  contributionType       SponsorshipContributionType
+  contributionAmountCents Int? // used when FLAT_PER_TRIP
+  contributionPercentage Decimal?                    @db.Decimal(6, 4) // used when PERCENTAGE
+  evOnly                 Boolean                     @default(true)
+  marketId               String?
+  market                 Market?                     @relation(fields: [marketId], references: [id])
+  serviceTypeId          String?
+  serviceType            ServiceType?                @relation(fields: [serviceTypeId], references: [id])
+  budgetTotalCents        Int
+  budgetSpentCents        Int                         @default(0)
+  startDate              DateTime
+  endDate                DateTime?
+  status                 SponsorshipProgramStatus     @default(DRAFT)
+  createdAt              DateTime                     @default(now())
+  updatedAt              DateTime                     @updatedAt
+
+  evRules       EvCompensationRule[]
+  contributions SponsorshipContribution[]
+
+  @@map("sponsorship_programs")
+}
+
+model SponsorshipContribution {
+  id            String   @id @default(cuid())
+  programId     String
+  program       SponsorshipProgram @relation(fields: [programId], references: [id])
+  rideId        String
+  ride          Ride     @relation(fields: [rideId], references: [id])
+  driverId      String
+  amountCents   Int
+  occurredAt    DateTime @default(now())
+
+  evBonusLineItems EvBonusLineItem[]
+  ledgerEntries    LedgerEntry[]
+
+  @@index([programId])
+  @@index([rideId])
+  @@map("sponsorship_contributions")
+}
+
+// ----------------------------------------------------------------------------
+// COMMERCE (driver store catalog + orders + driver-to-rider resale)
+// ----------------------------------------------------------------------------
+
+model ProductCategory {
+  id               String   @id @default(cuid())
+  name             String   @unique
+  slug             String   @unique
+  description      String?
+  ageRestricted    Boolean  @default(false)
+  regulatedCategory Boolean @default(false) // reserved; MVP disables sale in these categories entirely
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+
+  products     Product[]
+  commissionRules CommissionRule[]
+
+  @@map("product_categories")
+}
+
+enum ProductStatus {
+  ACTIVE
+  DISABLED
+  DISCONTINUED
+  RECALLED
+}
+
+model Product {
+  id                    String        @id @default(cuid())
+  sku                   String        @unique
+  name                  String
+  description           String?
+  categoryId            String
+  category              ProductCategory @relation(fields: [categoryId], references: [id])
+  priceCents            Int
+  platformCostCents     Int // platform's wholesale cost, used to compute platform profit
+  currency              String        @default("USD")
+  status                ProductStatus @default(ACTIVE)
+  resaleEligible        Boolean       @default(false) // must be explicitly designated for driver-to-rider resale
+  requiresSealedPackaging Boolean     @default(true)
+  ageRestricted         Boolean       @default(false)
+  expiresAt             DateTime? // per-batch expiration is tracked on InventoryStock/DriverInventoryItem lots in a fuller model; this is a simple product-level default
+  createdBy             String?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  images           ProductImage[]
+  inventoryStock   InventoryStock[]
+  driverInventory  DriverInventoryItem[]
+  orderItems       OrderItem[]
+  bundleItems      BundleItem[]
+  discounts        Discount[]
+  driverSales      DriverSale[]
+  commissionRules  CommissionRule[]
+
+  @@index([status])
+  @@index([resaleEligible])
+  @@map("products")
+}
+
+model ProductImage {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  url       String
+  altText   String?
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@map("product_images")
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+model Discount {
+  id               String       @id @default(cuid())
+  code             String?      @unique // null = automatic, always applied within window
+  name             String
+  type             DiscountType
+  value            Decimal      @db.Decimal(10, 4) // percentage as 0-1, or fixed cents as whole number cast to Decimal
+  productId        String?
+  product          Product?     @relation(fields: [productId], references: [id])
+  categoryId       String?
+  startsAt         DateTime
+  endsAt           DateTime?
+  active           Boolean      @default(true)
+  usageLimit       Int?
+  usageCount       Int          @default(0)
+  createdAt        DateTime     @default(now())
+
+  @@map("discounts")
+}
+
+model Bundle {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  priceCents  Int
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  items      BundleItem[]
+  orderItems OrderItem[]
+
+  @@map("bundles")
+}
+
+model BundleItem {
+  id        String  @id @default(cuid())
+  bundleId  String
+  bundle    Bundle  @relation(fields: [bundleId], references: [id])
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Int     @default(1)
+
+  @@unique([bundleId, productId])
+  @@map("bundle_items")
+}
+
+model InventoryLocation {
+  id        String   @id @default(cuid())
+  name      String   @unique // e.g. "Central Warehouse"
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  stock InventoryStock[]
+
+  @@map("inventory_locations")
+}
+
+model InventoryStock {
+  id                String            @id @default(cuid())
+  productId         String
+  product           Product           @relation(fields: [productId], references: [id])
+  locationId        String
+  location          InventoryLocation @relation(fields: [locationId], references: [id])
+  quantityOnHand    Int               @default(0)
+  quantityReserved  Int               @default(0)
+  reorderThreshold  Int               @default(0)
+  updatedAt         DateTime          @updatedAt
+
+  @@unique([productId, locationId])
+  @@map("inventory_stock")
+}
+
+// Platform admin CRUD: add/remove products, change prices, manage inventory,
+// upload images, create discounts/bundles, view orders, issue refunds,
+// disable products, view sales analytics — all operate on the models above
+// plus Order/DriverSale below via the commerce admin service layer.
+
+enum OrderStatus {
+  PENDING
+  PAID
+  FULFILLED
+  CANCELLED
+  REFUNDED
+}
+
+// Driver purchasing supplies from the platform store (for personal use
+// and/or to restock DriverInventory). Distinct from DriverSale, which is
+// the driver-to-rider resale transaction.
+model Order {
+  id              String      @id @default(cuid())
+  buyerDriverId   String
+  buyerDriver     Driver      @relation(fields: [buyerDriverId], references: [id])
+  status          OrderStatus @default(PENDING)
+  subtotalCents   Int
+  discountCents   Int         @default(0)
+  taxCents        Int         @default(0)
+  totalCents      Int
+  currency        String      @default("USD")
+  placedAt        DateTime    @default(now())
+  fulfilledAt     DateTime?
+
+  items        OrderItem[]
+  payments     Payment[]
+  fulfillments Fulfillment[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([buyerDriverId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id             String   @id @default(cuid())
+  orderId        String
+  order          Order    @relation(fields: [orderId], references: [id])
+  productId      String?
+  product        Product? @relation(fields: [productId], references: [id])
+  bundleId       String?
+  bundle         Bundle?  @relation(fields: [bundleId], references: [id])
+  skuSnapshot    String
+  quantity       Int
+  unitPriceCents Int
+  lineTotalCents Int
+
+  @@map("order_items")
+}
+
+enum FulfillmentMethod {
+  SHIP
+  PICKUP
+  DIGITAL
+}
+
+enum FulfillmentStatus {
+  PENDING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+model Fulfillment {
+  id             String            @id @default(cuid())
+  orderId        String
+  order          Order             @relation(fields: [orderId], references: [id])
+  method         FulfillmentMethod
+  status         FulfillmentStatus @default(PENDING)
+  carrier        String?
+  trackingNumber String?
+  shippedAt      DateTime?
+  deliveredAt    DateTime?
+
+  @@map("fulfillments")
+}
+
+// Admin-configurable driver commission for the resale flow. Falls back from
+// product-specific to category-level when no product rule matches.
+enum CommissionType {
+  PERCENTAGE
+  FLAT
+}
+
+model CommissionRule {
+  id                String          @id @default(cuid())
+  productId         String?
+  product           Product?        @relation(fields: [productId], references: [id])
+  categoryId        String?
+  category          ProductCategory? @relation(fields: [categoryId], references: [id])
+  type              CommissionType
+  value             Decimal         @db.Decimal(10, 4) // percentage as 0-1, or flat cents cast to Decimal
+  active            Boolean         @default(true)
+  effectiveStart    DateTime        @default(now())
+  effectiveEnd      DateTime?
+
+  @@map("commission_rules")
+}
+
+// The driver-to-rider resale transaction. Every field required by the spec
+// (product, SKU, driver, rider, ride, quantity, sale price, platform cost,
+// driver commission/profit, platform profit, timestamp) is captured here.
+enum DriverSaleStatus {
+  COMPLETED
+  REFUNDED
+}
+
+model DriverSale {
+  id                      String           @id @default(cuid())
+  productId               String
+  product                 Product          @relation(fields: [productId], references: [id])
+  skuSnapshot             String
+  driverId                String
+  driver                  Driver           @relation(fields: [driverId], references: [id])
+  riderId                 String
+  rider                   Rider            @relation(fields: [riderId], references: [id])
+  rideId                  String
+  ride                    Ride             @relation(fields: [rideId], references: [id])
+  quantity                Int
+  unitSalePriceCents      Int
+  totalSalePriceCents     Int
+  unitPlatformCostCents   Int
+  totalPlatformCostCents  Int
+  driverCommissionCents   Int
+  platformProfitCents     Int
+  paymentId               String?
+  payment                 Payment?         @relation(fields: [paymentId], references: [id])
+  status                  DriverSaleStatus @default(COMPLETED)
+  createdAt               DateTime         @default(now())
+
+  ledgerEntries  LedgerEntry[]
+  earningsLines  DriverEarningsLine[]
+  receiptLines   RiderReceiptLine[]
+
+  @@index([driverId])
+  @@index([riderId])
+  @@index([rideId])
+  @@map("driver_sales")
+}
+
+// ----------------------------------------------------------------------------
+// DRIVER_INVENTORY
+// ----------------------------------------------------------------------------
+
+// A driver's on-hand stock, decremented automatically on each DriverSale.
+// Drivers can mark items unavailable without deleting them.
+model DriverInventoryItem {
+  id                 String   @id @default(cuid())
+  driverId           String
+  driver             Driver   @relation(fields: [driverId], references: [id])
+  productId          String
+  product            Product  @relation(fields: [productId], references: [id])
+  quantityOnHand     Int      @default(0)
+  isAvailableForSale Boolean  @default(true)
+  lastRestockedAt    DateTime?
+  updatedAt          DateTime @updatedAt
+
+  @@unique([driverId, productId])
+  @@map("driver_inventory_items")
+}
+
+// ----------------------------------------------------------------------------
+// PAYMENTS
+// ----------------------------------------------------------------------------
+
+enum PayerType {
+  DRIVER
+  RIDER
+  ADVERTISER
+}
+
+enum PaymentStatus {
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+// Generic payment record used across ride fares, commerce orders, and
+// driver-to-rider resale — riders never hand card details to the driver.
+model Payment {
+  id            String        @id @default(cuid())
+  payerType     PayerType
+  payerId       String
+  orderId       String?
+  order         Order?        @relation(fields: [orderId], references: [id])
+  amountCents   Int
+  currency      String        @default("USD")
+  method        String // e.g. CARD_ON_FILE, WALLET
+  processorRef  String?
+  status        PaymentStatus @default(AUTHORIZED)
+  capturedAt    DateTime?
+  createdAt     DateTime      @default(now())
+
+  refunds     Refund[]
+  driverSales DriverSale[]
+  ledgerEntries LedgerEntry[]
+
+  @@map("payments")
+}
+
+model Refund {
+  id          String   @id @default(cuid())
+  paymentId   String
+  payment     Payment  @relation(fields: [paymentId], references: [id])
+  amountCents Int
+  reason      String?
+  status      String   @default("ISSUED")
+  issuedBy    String?
+  issuedAt    DateTime @default(now())
+
+  ledgerEntries LedgerEntry[]
+
+  @@map("refunds")
+}
+
+// ----------------------------------------------------------------------------
+// ADVERTISING
+// ----------------------------------------------------------------------------
+
+model Advertiser {
+  id           String   @id @default(cuid())
+  name         String
+  contactEmail String?
+  status       String   @default("ACTIVE")
+  createdAt    DateTime @default(now())
+
+  campaigns AdCampaign[]
+
+  @@map("advertisers")
+}
+
+enum AdCampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+// Fixed set of placements — advertising must never be inserted into
+// safety-critical navigation/emergency/trip-control surfaces, so this list
+// is intentionally closed rather than admin-arbitrary.
+enum AdPlacementSlot {
+  RIDER_APP_HOME
+  DRIVER_APP_HOME
+  TRIP_WAITING_SCREEN
+  DRIVER_APPROACHING_SCREEN
+  DURING_TRIP_SCREEN
+  POST_TRIP_SCREEN
+  RECEIPT_SCREEN
+  MARKETPLACE
+  PROMOTIONAL_NOTIFICATION
+}
+
+model AdCampaign {
+  id                   String           @id @default(cuid())
+  advertiserId         String
+  advertiser           Advertiser       @relation(fields: [advertiserId], references: [id])
+  name                 String
+  status               AdCampaignStatus @default(DRAFT)
+  budgetTotalCents     Int
+  budgetSpentCents     Int              @default(0)
+  startDate            DateTime
+  endDate              DateTime?
+  frequencyCapCount    Int? // max impressions per user...
+  frequencyCapPeriod   String? // ...per period, e.g. "DAILY", "CAMPAIGN"
+  destinationUrl       String?
+  promoCode            String?
+  createdBy            String?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  creatives     AdCreative[]
+  placements    AdCampaignPlacement[]
+  targetRules   AdTargetRule[]
+  impressions   AdImpression[]
+  clicks        AdClick[]
+  conversions   AdConversion[]
+  redemptions   PromoCodeRedemption[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([advertiserId, status])
+  @@map("ad_campaigns")
+}
+
+enum AdCreativeType {
+  IMAGE
+  VIDEO
+}
+
+model AdCreative {
+  id         String         @id @default(cuid())
+  campaignId String
+  campaign   AdCampaign     @relation(fields: [campaignId], references: [id])
+  type       AdCreativeType
+  assetUrl   String
+  headline   String?
+  bodyText   String?
+  ctaLabel   String?
+  version    Int            @default(1)
+  active     Boolean        @default(true)
+  uploadedAt DateTime       @default(now())
+
+  impressions AdImpression[]
+
+  @@index([campaignId, active])
+  @@map("ad_creatives")
+}
+
+model AdCampaignPlacement {
+  id         String          @id @default(cuid())
+  campaignId String
+  campaign   AdCampaign      @relation(fields: [campaignId], references: [id])
+  placement  AdPlacementSlot
+  priority   Int             @default(0)
+
+  @@unique([campaignId, placement])
+  @@map("ad_campaign_placements")
+}
+
+enum AdTargetScope {
+  ENTIRE_MARKET
+  ZONE
+  ZIP
+  RADIUS
+}
+
+// A campaign matches a viewer if ANY of its target rules match (OR across
+// rules); rules never expose per-rider travel history — matching happens
+// against the viewer's current market/zone/zip only.
+model AdTargetRule {
+  id              String        @id @default(cuid())
+  campaignId      String
+  campaign        AdCampaign    @relation(fields: [campaignId], references: [id])
+  scope           AdTargetScope
+  marketId        String?
+  market          Market?       @relation(fields: [marketId], references: [id])
+  zoneId          String?
+  zone            Zone?         @relation(fields: [zoneId], references: [id])
+  zip             String?
+  radiusCenterLat Decimal?      @db.Decimal(9, 6)
+  radiusCenterLng Decimal?      @db.Decimal(9, 6)
+  radiusMiles     Decimal?      @db.Decimal(6, 2)
+
+  @@index([campaignId])
+  @@map("ad_target_rules")
+}
+
+enum AdViewerType {
+  RIDER
+  DRIVER
+}
+
+// Aggregated analytics only — never a feed of raw rider location history.
+model AdImpression {
+  id               String          @id @default(cuid())
+  campaignId       String
+  campaign         AdCampaign      @relation(fields: [campaignId], references: [id])
+  creativeId       String
+  creative         AdCreative      @relation(fields: [creativeId], references: [id])
+  placement        AdPlacementSlot
+  viewerType       AdViewerType
+  viewerId         String
+  marketId         String?
+  zoneId           String?
+  zip              String?
+  isUniqueForViewer Boolean        @default(false)
+  occurredAt       DateTime        @default(now())
+
+  clicks AdClick[]
+
+  @@index([campaignId, occurredAt])
+  @@index([viewerId])
+  @@map("ad_impressions")
+}
+
+model AdClick {
+  id           String       @id @default(cuid())
+  impressionId String
+  impression   AdImpression @relation(fields: [impressionId], references: [id])
+  campaignId   String
+  campaign     AdCampaign   @relation(fields: [campaignId], references: [id])
+  occurredAt   DateTime     @default(now())
+
+  @@index([campaignId, occurredAt])
+  @@map("ad_clicks")
+}
+
+model AdConversion {
+  id             String   @id @default(cuid())
+  campaignId     String
+  campaign       AdCampaign @relation(fields: [campaignId], references: [id])
+  conversionType String // PROMO_CODE_REDEEMED, SIGNUP, PURCHASE
+  referenceId    String?
+  amountCents    Int?
+  occurredAt     DateTime @default(now())
+
+  @@index([campaignId, occurredAt])
+  @@map("ad_conversions")
+}
+
+model PromoCodeRedemption {
+  id           String   @id @default(cuid())
+  campaignId   String
+  campaign     AdCampaign @relation(fields: [campaignId], references: [id])
+  promoCode    String
+  userId       String
+  userType     AdViewerType
+  redeemedAt   DateTime @default(now())
+  referenceId  String? // e.g. orderId or rideId the redemption applied to
+
+  @@index([campaignId])
+  @@map("promo_code_redemptions")
+}
+
+// ----------------------------------------------------------------------------
+// AD_CONSENT
+// ----------------------------------------------------------------------------
+
+enum AdConsentType {
+  PERSONALIZED_OFFERS // location/behavior-based personalized advertising
+  NON_PERSONALIZED_ADVERTISING // generic, non-targeted advertising
+}
+
+enum AdConsentStatus {
+  GRANTED
+  DENIED
+  WITHDRAWN
+}
+
+// Explicitly separate from Terms-of-Service acceptance: ToS consent must
+// never be read as advertising consent. One row per (user, consentType)
+// state transition, so history is fully auditable.
+model AdConsentRecord {
+  id             String          @id @default(cuid())
+  driverId       String?
+  driver         Driver?         @relation("DriverAdConsent", fields: [driverId], references: [id])
+  riderId        String?
+  rider          Rider?          @relation("RiderAdConsent", fields: [riderId], references: [id])
+  consentType    AdConsentType
+  status         AdConsentStatus
+  policyVersion  String
+  grantedAt      DateTime?
+  withdrawnAt    DateTime?
+  sourceScreen   String?
+  createdAt      DateTime        @default(now())
+
+  @@index([driverId])
+  @@index([riderId])
+  @@map("ad_consent_records")
+}
+
+model TermsOfServiceAcceptance {
+  id            String   @id @default(cuid())
+  userId        String
+  userType      AdViewerType
+  policyVersion String
+  acceptedAt    DateTime @default(now())
+
+  @@map("tos_acceptances")
+}
+
+// ----------------------------------------------------------------------------
+// THERAPY_RIDES (licensed psychiatrist/therapist ride-along sessions)
+//
+// A patient books a session with a licensed therapist; the underlying trip
+// is a normal Ride (created once a route is selected) whose length is driven
+// by the session's durationMinutes rather than by distance. The therapist's
+// physical safety is the reason routes are never patient-chosen from
+// scratch: a therapist maintains their own pre-vetted TherapistSafeRoute
+// list, and a session only ever offers 3 routes drawn from THAT list — the
+// patient gets a real choice, but only among options the therapist already
+// approved for their own safety.
+// ----------------------------------------------------------------------------
+
+model Therapist {
+  id                String    @id @default(cuid())
+  name              String
+  email             String    @unique
+  licenseNumber     String
+  licenseState      String
+  npiNumber         String?
+  licenseVerifiedAt DateTime? // manual verification only in the MVP — see README known gaps
+  active            Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+
+  safeRoutes TherapistSafeRoute[]
+  sessions   TherapySession[]
+
+  @@map("therapists")
+}
+
+// Reusable, therapist-owned route options. A TherapySessionRouteOffer may
+// only reference a route from this table — there is no code path that lets
+// a session offer an ad hoc/unvetted route.
+model TherapistSafeRoute {
+  id                       String    @id @default(cuid())
+  therapistId              String
+  therapist                Therapist @relation(fields: [therapistId], references: [id])
+  name                     String // e.g. "Riverside loop"
+  zoneId                   String?
+  zone                     Zone?     @relation(fields: [zoneId], references: [id])
+  estimatedDurationMinutes Int
+  active                   Boolean   @default(true)
+  createdAt                DateTime  @default(now())
+
+  routeOffers TherapySessionRouteOffer[]
+
+  @@index([therapistId, active])
+  @@map("therapist_safe_routes")
+}
+
+enum TherapyConsentType {
+  TREATMENT_CONSENT
+  IN_VEHICLE_SESSION_CONSENT
+}
+
+enum TherapyConsentStatus {
+  GRANTED
+  WITHDRAWN
+}
+
+// Deliberately its own model — never inferred from TermsOfServiceAcceptance
+// or AdConsentRecord (same rule as AD_CONSENT: consent for one purpose is
+// never treated as consent for another). Append-only; a session may only be
+// requested while the patient's most recent TREATMENT_CONSENT record is
+// GRANTED — absence of a record and WITHDRAWN both fail closed.
+model TherapyConsentRecord {
+  id            String               @id @default(cuid())
+  patientId     String
+  patient       Rider                @relation(fields: [patientId], references: [id])
+  consentType   TherapyConsentType
+  status        TherapyConsentStatus
+  policyVersion String
+  grantedAt     DateTime?
+  withdrawnAt   DateTime?
+  createdAt     DateTime             @default(now())
+
+  @@index([patientId, consentType])
+  @@map("therapy_consent_records")
+}
+
+enum TherapySessionStatus {
+  REQUESTED
+  ROUTE_OFFERED
+  ROUTE_SELECTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum TherapyPayerType {
+  SELF_PAY
+  INSURANCE
+  EMPLOYER_SPONSORED
+}
+
+model TherapySession {
+  id              String               @id @default(cuid())
+  patientId       String
+  patient         Rider                @relation(fields: [patientId], references: [id])
+  therapistId     String
+  therapist       Therapist            @relation(fields: [therapistId], references: [id])
+  marketId        String
+  market          Market               @relation(fields: [marketId], references: [id])
+  serviceTypeId   String
+  serviceType     ServiceType          @relation(fields: [serviceTypeId], references: [id])
+  rideId          String?              @unique // set once a route is selected and the underlying Ride is created
+  ride            Ride?                @relation(fields: [rideId], references: [id])
+  status          TherapySessionStatus @default(REQUESTED)
+  scheduledStart  DateTime
+  durationMinutes Int // the ride's length IS the session length
+  feeCents        Int // full session fee, before payer split
+  payerType       TherapyPayerType
+  sponsorId       String? // required when payerType = EMPLOYER_SPONSORED
+  sponsor         Sponsor?             @relation(fields: [sponsorId], references: [id])
+  consentRecordId String // the TherapyConsentRecord that was GRANTED at request time
+  requestedAt     DateTime             @default(now())
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+
+  routeOffers    TherapySessionRouteOffer[]
+  insuranceClaim InsuranceClaim?
+  ledgerEntries  LedgerEntry[]
+
+  @@index([patientId])
+  @@index([therapistId])
+  @@map("therapy_sessions")
+}
+
+// The (up to) 3 options offered per session, each drawn from the assigned
+// therapist's own TherapistSafeRoute list. presentedOrder is 1-based and has
+// no safety meaning of its own — it only controls display order.
+model TherapySessionRouteOffer {
+  id             String             @id @default(cuid())
+  sessionId      String
+  session        TherapySession     @relation(fields: [sessionId], references: [id])
+  safeRouteId    String
+  safeRoute      TherapistSafeRoute @relation(fields: [safeRouteId], references: [id])
+  presentedOrder Int
+  selectedAt     DateTime?
+
+  @@unique([sessionId, safeRouteId])
+  @@index([sessionId])
+  @@map("therapy_session_route_offers")
+}
+
+enum InsuranceClaimStatus {
+  SUBMITTED
+  PAID
+  DENIED
+}
+
+// MVP stub: records that a claim exists and what the patient owes up front.
+// Real clearinghouse adjudication/remittance ingestion is out of scope (see
+// README known gaps) — status only ever moves via the manual
+// markInsuranceClaimPaid/markInsuranceClaimDenied service calls today.
+model InsuranceClaim {
+  id                         String               @id @default(cuid())
+  sessionId                  String               @unique
+  session                    TherapySession       @relation(fields: [sessionId], references: [id])
+  payerName                  String
+  memberIdLast4              String
+  billedCents                Int // the amount billed to the insurer (feeCents minus patientResponsibilityCents)
+  patientResponsibilityCents Int
+  status                     InsuranceClaimStatus @default(SUBMITTED)
+  submittedAt                DateTime             @default(now())
+  paidAt                     DateTime?
+
+  ledgerEntries LedgerEntry[]
+
+  @@map("insurance_claims")
+}
+
+// ----------------------------------------------------------------------------
+// DRIVER_EARNINGS (the ledger — single source of truth for where every
+// dollar originated and where it went)
+// ----------------------------------------------------------------------------
+
+enum BoundedModule {
+  RIDES
+  DISPATCH
+  PRICING
+  EV_INCENTIVES
+  COMMERCE
+  DRIVER_INVENTORY
+  ADVERTISING
+  AD_CONSENT
+  SPONSORSHIPS
+  PAYMENTS
+  THERAPY_RIDES
+  DRIVER_EARNINGS
+}
+
+enum LedgerEntryType {
+  RIDE_FARE_RIDER_CHARGE
+  RIDE_BASE_DRIVER_EARNINGS
+  RIDE_EV_SUPPLEMENT
+  RIDE_SPONSORED_BONUS
+  PLATFORM_SERVICE_FEE
+  DRIVER_STORE_PURCHASE_REVENUE
+  DRIVER_STORE_PURCHASE_COGS
+  DRIVER_SALE_RIDER_CHARGE
+  DRIVER_SALE_DRIVER_COMMISSION
+  DRIVER_SALE_PLATFORM_PROFIT
+  AD_CAMPAIGN_SPEND
+  AD_REVENUE
+  SPONSORSHIP_CONTRIBUTION
+  THERAPY_SESSION_PATIENT_CHARGE
+  THERAPY_SESSION_EMPLOYER_CONTRIBUTION
+  THERAPY_SESSION_THERAPIST_EARNINGS
+  THERAPY_SESSION_PLATFORM_FEE
+  REFUND
+}
+
+enum LedgerDirection {
+  CREDIT
+  DEBIT
+}
+
+enum LedgerPartyType {
+  PLATFORM
+  DRIVER
+  RIDER
+  ADVERTISER
+  SPONSOR
+  THERAPIST
+}
+
+// Append-only. Never update or delete a posted entry — corrections are
+// issued as a new offsetting entry (e.g. a REFUND row), so the ledger always
+// reconstructs full history.
+model LedgerEntry {
+  id            String          @id @default(cuid())
+  entryType     LedgerEntryType
+  sourceModule  BoundedModule
+  direction     LedgerDirection
+  partyType     LedgerPartyType
+  partyId       String? // polymorphic: driverId / riderId / advertiserId / sponsorId; null for PLATFORM
+  driverId      String? // denormalized for fast per-driver ledger queries when partyType = DRIVER
+  driver        Driver?         @relation("DriverLedgerParty", fields: [driverId], references: [id])
+  amountCents   Int // always positive; direction + partyType convey flow
+  currency      String          @default("USD")
+
+  rideId                     String?
+  ride                       Ride?                     @relation(fields: [rideId], references: [id])
+  orderId                    String?
+  order                      Order?                    @relation(fields: [orderId], references: [id])
+  driverSaleId               String?
+  driverSale                 DriverSale?               @relation(fields: [driverSaleId], references: [id])
+  evBonusLineItemId          String?
+  evBonusLineItem            EvBonusLineItem?          @relation(fields: [evBonusLineItemId], references: [id])
+  sponsorshipContributionId  String?
+  sponsorshipContribution    SponsorshipContribution?  @relation(fields: [sponsorshipContributionId], references: [id])
+  adCampaignId               String?
+  adCampaign                 AdCampaign?               @relation(fields: [adCampaignId], references: [id])
+  paymentId                  String?
+  payment                    Payment?                  @relation(fields: [paymentId], references: [id])
+  refundId                   String?
+  refund                     Refund?                   @relation(fields: [refundId], references: [id])
+  therapySessionId           String?
+  therapySession             TherapySession?           @relation(fields: [therapySessionId], references: [id])
+  insuranceClaimId           String?
+  insuranceClaim             InsuranceClaim?           @relation(fields: [insuranceClaimId], references: [id])
+
+  description String?
+  occurredAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  earningsLines DriverEarningsLine[]
+  receiptLines  RiderReceiptLine[]
+
+  @@index([partyType, partyId])
+  @@index([driverId])
+  @@index([rideId])
+  @@index([entryType])
+  @@map("ledger_entries")
+}
+
+enum DriverEarningsLineType {
+  RIDE_BASE
+  EV_SUPPLEMENT
+  SPONSORED_BONUS
+  COMMERCE_COMMISSION
+}
+
+// Driver-facing view materialized from LedgerEntry at write time, purely so
+// the "Standard driver earnings / EV supplement / Total driver earnings"
+// breakdown can be queried cheaply. LedgerEntry remains the source of truth.
+model DriverEarningsLine {
+  id             String                 @id @default(cuid())
+  driverId       String
+  driver         Driver                 @relation(fields: [driverId], references: [id])
+  rideId         String?
+  ride           Ride?                  @relation(fields: [rideId], references: [id])
+  lineType       DriverEarningsLineType
+  amountCents    Int
+  description    String?
+  ledgerEntryId  String
+  ledgerEntry    LedgerEntry            @relation(fields: [ledgerEntryId], references: [id])
+  evBonusLineItemId String?
+  evBonusLineItem   EvBonusLineItem?    @relation(fields: [evBonusLineItemId], references: [id])
+  driverSaleId   String?
+  driverSale     DriverSale?            @relation(fields: [driverSaleId], references: [id])
+  createdAt      DateTime               @default(now())
+
+  @@index([driverId])
+  @@index([rideId])
+  @@map("driver_earnings_lines")
+}
+
+enum RiderReceiptLineType {
+  BASE_FARE
+  EV_SUPPLEMENT_CHARGE
+  SERVICE_FEE
+  PRODUCT_PURCHASE
+  PROMO_DISCOUNT
+}
+
+// Rider-facing receipt view, same rationale as DriverEarningsLine: the EV
+// component must be clearly and separately identified on the receipt.
+model RiderReceiptLine {
+  id             String               @id @default(cuid())
+  rideId         String
+  ride           Ride                 @relation(fields: [rideId], references: [id])
+  lineType       RiderReceiptLineType
+  amountCents    Int
+  description    String?
+  ledgerEntryId  String
+  ledgerEntry    LedgerEntry          @relation(fields: [ledgerEntryId], references: [id])
+  evBonusLineItemId String?
+  evBonusLineItem   EvBonusLineItem?  @relation(fields: [evBonusLineItemId], references: [id])
+  driverSaleId   String?
+  driverSale     DriverSale?          @relation(fields: [driverSaleId], references: [id])
+  createdAt      DateTime             @default(now())
+
+  @@index([rideId])
+  @@map("rider_receipt_lines")
+}
