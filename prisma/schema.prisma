@@ -21,6 +21,8 @@
 //   PAYMENTS         generic payment/refund processing
 //   ADVERTISING      campaigns, creatives, targeting, analytics
 //   AD_CONSENT       advertising consent records (distinct from ToS)
+//   THERAPY_RIDES    licensed-therapist ride-along sessions (separate consent,
+//                    therapist-vetted route safety mechanic, multi-payer fees)
 //   DRIVER_EARNINGS  the append-only financial ledger + driver-facing views
 // ============================================================================
 
@@ -53,6 +55,7 @@ model Market {
   sponsorPrograms   SponsorshipProgram[]
   adTargetRules     AdTargetRule[]
   onlineSessions    DriverOnlineSession[]
+  therapySessions   TherapySession[]
 
   @@map("markets")
 }
@@ -74,9 +77,10 @@ model Zone {
   active    Boolean   @default(true)
   createdAt DateTime  @default(now())
 
-  zipMappings   ZipZoneMapping[]
-  rides         Ride[]
-  adTargetRules AdTargetRule[]
+  zipMappings        ZipZoneMapping[]
+  rides              Ride[]
+  adTargetRules      AdTargetRule[]
+  therapistSafeRoutes TherapistSafeRoute[]
 
   @@unique([marketId, name])
   @@map("zones")
@@ -104,9 +108,10 @@ model ServiceType {
   active    Boolean  @default(true)
   createdAt DateTime @default(now())
 
-  rides        Ride[]
-  evRules      EvCompensationRule[]
-  sponsorProgs SponsorshipProgram[]
+  rides           Ride[]
+  evRules         EvCompensationRule[]
+  sponsorProgs    SponsorshipProgram[]
+  therapySessions TherapySession[]
 
   @@map("service_types")
 }
@@ -186,9 +191,11 @@ model Rider {
   status    String   @default("ACTIVE")
   createdAt DateTime @default(now())
 
-  rides         Ride[]
-  purchases     DriverSale[]
-  adConsents    AdConsentRecord[] @relation("RiderAdConsent")
+  rides                 Ride[]
+  purchases             DriverSale[]
+  adConsents            AdConsentRecord[] @relation("RiderAdConsent")
+  therapyConsentRecords TherapyConsentRecord[]
+  therapySessions       TherapySession[]
 
   @@map("riders")
 }
@@ -247,6 +254,7 @@ model Ride {
   ledgerEntries     LedgerEntry[]
   earningsLines     DriverEarningsLine[]
   receiptLines      RiderReceiptLine[]
+  therapySession    TherapySession?
 
   @@index([driverId])
   @@index([riderId])
@@ -427,7 +435,8 @@ model Sponsor {
   status       String   @default("ACTIVE")
   createdAt    DateTime @default(now())
 
-  programs SponsorshipProgram[]
+  programs        SponsorshipProgram[]
+  therapySessions TherapySession[]
 
   @@map("sponsors")
 }
@@ -1106,6 +1115,178 @@ model TermsOfServiceAcceptance {
 }
 
 // ----------------------------------------------------------------------------
+// THERAPY_RIDES (licensed psychiatrist/therapist ride-along sessions)
+//
+// A patient books a session with a licensed therapist; the underlying trip
+// is a normal Ride (created once a route is selected) whose length is driven
+// by the session's durationMinutes rather than by distance. The therapist's
+// physical safety is the reason routes are never patient-chosen from
+// scratch: a therapist maintains their own pre-vetted TherapistSafeRoute
+// list, and a session only ever offers 3 routes drawn from THAT list — the
+// patient gets a real choice, but only among options the therapist already
+// approved for their own safety.
+// ----------------------------------------------------------------------------
+
+model Therapist {
+  id                String    @id @default(cuid())
+  name              String
+  email             String    @unique
+  licenseNumber     String
+  licenseState      String
+  npiNumber         String?
+  licenseVerifiedAt DateTime? // manual verification only in the MVP — see README known gaps
+  active            Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+
+  safeRoutes TherapistSafeRoute[]
+  sessions   TherapySession[]
+
+  @@map("therapists")
+}
+
+// Reusable, therapist-owned route options. A TherapySessionRouteOffer may
+// only reference a route from this table — there is no code path that lets
+// a session offer an ad hoc/unvetted route.
+model TherapistSafeRoute {
+  id                       String    @id @default(cuid())
+  therapistId              String
+  therapist                Therapist @relation(fields: [therapistId], references: [id])
+  name                     String // e.g. "Riverside loop"
+  zoneId                   String?
+  zone                     Zone?     @relation(fields: [zoneId], references: [id])
+  estimatedDurationMinutes Int
+  active                   Boolean   @default(true)
+  createdAt                DateTime  @default(now())
+
+  routeOffers TherapySessionRouteOffer[]
+
+  @@index([therapistId, active])
+  @@map("therapist_safe_routes")
+}
+
+enum TherapyConsentType {
+  TREATMENT_CONSENT
+  IN_VEHICLE_SESSION_CONSENT
+}
+
+enum TherapyConsentStatus {
+  GRANTED
+  WITHDRAWN
+}
+
+// Deliberately its own model — never inferred from TermsOfServiceAcceptance
+// or AdConsentRecord (same rule as AD_CONSENT: consent for one purpose is
+// never treated as consent for another). Append-only; a session may only be
+// requested while the patient's most recent TREATMENT_CONSENT record is
+// GRANTED — absence of a record and WITHDRAWN both fail closed.
+model TherapyConsentRecord {
+  id            String               @id @default(cuid())
+  patientId     String
+  patient       Rider                @relation(fields: [patientId], references: [id])
+  consentType   TherapyConsentType
+  status        TherapyConsentStatus
+  policyVersion String
+  grantedAt     DateTime?
+  withdrawnAt   DateTime?
+  createdAt     DateTime             @default(now())
+
+  @@index([patientId, consentType])
+  @@map("therapy_consent_records")
+}
+
+enum TherapySessionStatus {
+  REQUESTED
+  ROUTE_OFFERED
+  ROUTE_SELECTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum TherapyPayerType {
+  SELF_PAY
+  INSURANCE
+  EMPLOYER_SPONSORED
+}
+
+model TherapySession {
+  id              String               @id @default(cuid())
+  patientId       String
+  patient         Rider                @relation(fields: [patientId], references: [id])
+  therapistId     String
+  therapist       Therapist            @relation(fields: [therapistId], references: [id])
+  marketId        String
+  market          Market               @relation(fields: [marketId], references: [id])
+  serviceTypeId   String
+  serviceType     ServiceType          @relation(fields: [serviceTypeId], references: [id])
+  rideId          String?              @unique // set once a route is selected and the underlying Ride is created
+  ride            Ride?                @relation(fields: [rideId], references: [id])
+  status          TherapySessionStatus @default(REQUESTED)
+  scheduledStart  DateTime
+  durationMinutes Int // the ride's length IS the session length
+  feeCents        Int // full session fee, before payer split
+  payerType       TherapyPayerType
+  sponsorId       String? // required when payerType = EMPLOYER_SPONSORED
+  sponsor         Sponsor?             @relation(fields: [sponsorId], references: [id])
+  consentRecordId String // the TherapyConsentRecord that was GRANTED at request time
+  requestedAt     DateTime             @default(now())
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+
+  routeOffers    TherapySessionRouteOffer[]
+  insuranceClaim InsuranceClaim?
+  ledgerEntries  LedgerEntry[]
+
+  @@index([patientId])
+  @@index([therapistId])
+  @@map("therapy_sessions")
+}
+
+// The (up to) 3 options offered per session, each drawn from the assigned
+// therapist's own TherapistSafeRoute list. presentedOrder is 1-based and has
+// no safety meaning of its own — it only controls display order.
+model TherapySessionRouteOffer {
+  id             String             @id @default(cuid())
+  sessionId      String
+  session        TherapySession     @relation(fields: [sessionId], references: [id])
+  safeRouteId    String
+  safeRoute      TherapistSafeRoute @relation(fields: [safeRouteId], references: [id])
+  presentedOrder Int
+  selectedAt     DateTime?
+
+  @@unique([sessionId, safeRouteId])
+  @@index([sessionId])
+  @@map("therapy_session_route_offers")
+}
+
+enum InsuranceClaimStatus {
+  SUBMITTED
+  PAID
+  DENIED
+}
+
+// MVP stub: records that a claim exists and what the patient owes up front.
+// Real clearinghouse adjudication/remittance ingestion is out of scope (see
+// README known gaps) — status only ever moves via the manual
+// markInsuranceClaimPaid/markInsuranceClaimDenied service calls today.
+model InsuranceClaim {
+  id                         String               @id @default(cuid())
+  sessionId                  String               @unique
+  session                    TherapySession       @relation(fields: [sessionId], references: [id])
+  payerName                  String
+  memberIdLast4              String
+  billedCents                Int // the amount billed to the insurer (feeCents minus patientResponsibilityCents)
+  patientResponsibilityCents Int
+  status                     InsuranceClaimStatus @default(SUBMITTED)
+  submittedAt                DateTime             @default(now())
+  paidAt                     DateTime?
+
+  ledgerEntries LedgerEntry[]
+
+  @@map("insurance_claims")
+}
+
+// ----------------------------------------------------------------------------
 // DRIVER_EARNINGS (the ledger — single source of truth for where every
 // dollar originated and where it went)
 // ----------------------------------------------------------------------------
@@ -1121,6 +1302,7 @@ enum BoundedModule {
   AD_CONSENT
   SPONSORSHIPS
   PAYMENTS
+  THERAPY_RIDES
   DRIVER_EARNINGS
 }
 
@@ -1138,6 +1320,10 @@ enum LedgerEntryType {
   AD_CAMPAIGN_SPEND
   AD_REVENUE
   SPONSORSHIP_CONTRIBUTION
+  THERAPY_SESSION_PATIENT_CHARGE
+  THERAPY_SESSION_EMPLOYER_CONTRIBUTION
+  THERAPY_SESSION_THERAPIST_EARNINGS
+  THERAPY_SESSION_PLATFORM_FEE
   REFUND
 }
 
@@ -1152,6 +1338,7 @@ enum LedgerPartyType {
   RIDER
   ADVERTISER
   SPONSOR
+  THERAPIST
 }
 
 // Append-only. Never update or delete a posted entry — corrections are
@@ -1185,6 +1372,10 @@ model LedgerEntry {
   payment                    Payment?                  @relation(fields: [paymentId], references: [id])
   refundId                   String?
   refund                     Refund?                   @relation(fields: [refundId], references: [id])
+  therapySessionId           String?
+  therapySession             TherapySession?           @relation(fields: [therapySessionId], references: [id])
+  insuranceClaimId           String?
+  insuranceClaim             InsuranceClaim?           @relation(fields: [insuranceClaimId], references: [id])
 
   description String?
   occurredAt  DateTime @default(now())

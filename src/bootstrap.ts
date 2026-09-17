@@ -7,3 +7,4 @@
  * Import this once, before the HTTP app starts serving traffic.
  */
 import "./modules/ev-incentives/register";
+import "./modules/therapy-rides/register";

@@ -52,6 +52,12 @@ const ALL_TABLES = [
   "promo_code_redemptions",
   "ad_consent_records",
   "tos_acceptances",
+  "therapists",
+  "therapist_safe_routes",
+  "therapy_consent_records",
+  "therapy_sessions",
+  "therapy_session_route_offers",
+  "insurance_claims",
   "ledger_entries",
   "driver_earnings_lines",
   "rider_receipt_lines",
@@ -113,6 +119,32 @@ export async function createEvVehicle(driverId: string, marketId: string) {
       approvalStatus: "APPROVED",
       verifiedAt: new Date(),
       active: true,
+    },
+  });
+}
+
+export async function createTestTherapist(overrides: Partial<{ name: string; email: string }> = {}) {
+  driverCounter += 1;
+  return prisma.therapist.create({
+    data: {
+      name: overrides.name ?? `Test Therapist ${driverCounter}`,
+      email: overrides.email ?? `therapist${driverCounter}@test.example`,
+      licenseNumber: `LIC-${driverCounter}`,
+      licenseState: "FL",
+    },
+  });
+}
+
+export async function createTherapistSafeRoute(
+  therapistId: string,
+  overrides: Partial<{ name: string; estimatedDurationMinutes: number; zoneId: string | null }> = {}
+) {
+  return prisma.therapistSafeRoute.create({
+    data: {
+      therapistId,
+      name: overrides.name ?? "Test safe route",
+      estimatedDurationMinutes: overrides.estimatedDurationMinutes ?? 50,
+      zoneId: overrides.zoneId ?? null,
     },
   });
 }

@@ -28,6 +28,7 @@ advertising revenue into one generic amount field.
 | `payments` | Generic payment/refund processing |
 | `advertising` | Ad campaigns, creatives, geographic targeting, analytics |
 | `ad-consent` | Advertising consent records (kept distinct from ToS acceptance) |
+| `therapy-rides` | Licensed-therapist ride-along sessions: consent, therapist-vetted route safety, multi-payer fee splitting |
 | `driver-earnings` | The ledger itself, plus driver/rider-facing summary views (`src/lib/ledger.ts`, `DriverEarningsLine`, `RiderReceiptLine`) |
 
 Cross-module orchestration at ride completion (pricing → EV incentives →
@@ -96,6 +97,34 @@ rider actually funds part of it).
   performance) — advertisers never see a raw list of which riders/drivers
   were served.
 
+## Licensed-therapist ride-along sessions (`therapy-rides`)
+
+A patient books a session with a licensed therapist; the actual trip is a
+normal `Ride`, but its length is driven by the session's `durationMinutes`
+rather than by distance, and its route is never patient-chosen from scratch:
+
+- **Consent** (`TherapyConsentRecord`) is its own model, append-only, and
+  deliberately never inferred from `TermsOfServiceAcceptance` or
+  `AdConsentRecord` — a session can only be requested while the patient's
+  most recent `TREATMENT_CONSENT` record is `GRANTED`; absence of a record
+  and `WITHDRAWN` both fail closed.
+- **Route safety** is the actual point of the "3 options" flow: each
+  therapist maintains their own reusable, pre-vetted `TherapistSafeRoute`
+  list, and a session only ever offers up to 3 of *that specific
+  therapist's* routes (closest match to the requested `durationMinutes`).
+  The patient gets a real choice, but it is always bounded by what the
+  therapist already approved for their own safety — there is no code path
+  that lets a session offer an arbitrary/unvetted route.
+- **Multi-payer fees** (`SELF_PAY`, `INSURANCE`, `EMPLOYER_SPONSORED`) are
+  settled on ride completion via the same hook-registry pattern as
+  `ev-incentives`/`sponsorships` (`src/modules/therapy-rides/engine.ts`).
+  `SELF_PAY` and `EMPLOYER_SPONSORED` post the full fee immediately, mirroring
+  how `SPONSORSHIPS` treats a sponsor's contracted rate as billed on the
+  spot. `INSURANCE` only ever charges the patient's own responsibility
+  portion at completion — the insurer's share is **not** posted to the
+  ledger until `markInsuranceClaimPaid()` is called, because money is only
+  ever recorded once it has actually moved.
+
 ## Getting started
 
 ```bash
@@ -128,8 +157,9 @@ Set `TEST_DATABASE_URL` (see `tests/env.ts`) to point at a different test
 database. Coverage focuses on the money-moving paths and their edge cases:
 EV bonus rule matching/stacking/funding-source reconciliation, the
 driver-to-rider resale flow's eligibility gates and commission/profit split,
-cumulative refund limits, discount validation, and consent-gated ad
-targeting — including regression tests for every bug found in code review
+cumulative refund limits, discount validation, consent-gated ad
+targeting, and the therapy-rides consent gate/route-safety/multi-payer fee
+split — including regression tests for every bug found in code review
 (sponsorship contribution mismatch, cumulative over-refund, unlogged
 platform losses, unclamped discounts).
 
@@ -145,3 +175,13 @@ platform losses, unclamped discounts).
 - `recordCampaignSpend`/`recordAdRevenue` exist and are ledger-correct but
   are only wired to a manual admin "record spend" endpoint — the spec left
   the actual billing model (CPM/CPC/flat) undefined.
+- `therapy-rides` is an MVP scaffold, not a compliance-complete clinical
+  product. In particular: `Therapist.licenseVerifiedAt` is set manually —
+  there's no live license-verification integration; `InsuranceClaim`
+  adjudication/remittance is a manual `markInsuranceClaimPaid` call, not a
+  real clearinghouse integration; there is no crisis-escalation protocol
+  (what happens if a patient has an acute episode mid-ride is entirely
+  outside this code); and `TherapySessionStatus.IN_PROGRESS` is never set
+  automatically because `RIDES` only exposes a completion hook today, not a
+  start hook — a session currently jumps straight from `ROUTE_SELECTED` to
+  `COMPLETED`.

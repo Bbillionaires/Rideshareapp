@@ -39,6 +39,8 @@ export interface LedgerEntryInput {
   adCampaignId?: string | null;
   paymentId?: string | null;
   refundId?: string | null;
+  therapySessionId?: string | null;
+  insuranceClaimId?: string | null;
   description?: string | null;
   occurredAt?: Date;
 }
@@ -71,6 +73,8 @@ export async function postLedgerEntry(tx: PrismaTx, input: LedgerEntryInput) {
       adCampaignId: input.adCampaignId ?? null,
       paymentId: input.paymentId ?? null,
       refundId: input.refundId ?? null,
+      therapySessionId: input.therapySessionId ?? null,
+      insuranceClaimId: input.insuranceClaimId ?? null,
       description: input.description ?? null,
       occurredAt: input.occurredAt ?? new Date(),
     },
