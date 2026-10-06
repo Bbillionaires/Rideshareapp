@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RideshareApp (MVP)</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 48px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { margin-bottom: 4px; }
+  p.sub { color: #666; margin-top: 0; }
+  .cards { display: flex; gap: 16px; margin-top: 32px; flex-wrap: wrap; }
+  a.card { flex: 1 1 220px; display: block; border: 1px solid #ddd; border-radius: 10px; padding: 20px; text-decoration: none; color: inherit; }
+  a.card:hover { border-color: #888; }
+  a.card h2 { margin: 0 0 8px; font-size: 1.1rem; }
+  a.card p { margin: 0; color: #666; font-size: 0.9rem; }
+  .badge { display: inline-block; background: #fff3cd; color: #7a5b00; border-radius: 6px; padding: 2px 8px; font-size: 0.75rem; margin-top: 24px; }
+</style>
+</head>
+<body>
+  <h1>RideshareApp</h1>
+  <p class="sub">Minimal test-mode MVP frontends on top of the backend API.</p>
+  <div class="cards">
+    <a class="card" href="/rider/">
+      <h2>Rider app →</h2>
+      <p>Request a ride, track status, view history.</p>
+    </a>
+    <a class="card" href="/driver/">
+      <h2>Driver app →</h2>
+      <p>Go online, accept a ride, complete it.</p>
+    </a>
+  </div>
+  <p class="badge">Test / sandbox mode — Stripe payments (if configured) use test-mode keys only.</p>
+  <p>API documentation: see <code>docs/API.md</code> in the repo.</p>
+</body>
+</html>

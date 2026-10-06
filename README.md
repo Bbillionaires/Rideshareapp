@@ -18,6 +18,7 @@ advertising revenue into one generic amount field.
 
 | Module | Responsibility |
 | --- | --- |
+| `accounts` | Minimal driver/rider/vehicle creation + driver online/offline presence (added for the web MVPs — **not** an authentication system, see docs/API.md) |
 | `rides` | Trip lifecycle (request → accept → start → complete/cancel) |
 | `dispatch` | Offer/response log (`RideOffer`) — intentionally minimal |
 | `pricing` | Computes the standard ride fare and "standard driver earnings" |
@@ -25,11 +26,19 @@ advertising revenue into one generic amount field.
 | `sponsorships` | Business-sponsored driver incentive programs |
 | `commerce` | In-app driver store (catalog, orders) + driver-to-rider resale |
 | `driver-inventory` | Per-driver on-hand stock for resale |
-| `payments` | Generic payment/refund processing |
+| `payments` | Generic payment/refund processing, plus test-mode Stripe settlement of each completed ride's fare |
 | `advertising` | Ad campaigns, creatives, geographic targeting, analytics |
 | `ad-consent` | Advertising consent records (kept distinct from ToS acceptance) |
 | `therapy-rides` | Licensed-therapist ride-along sessions: consent, therapist-vetted route safety, multi-payer fee splitting |
 | `driver-earnings` | The ledger itself, plus driver/rider-facing summary views (`src/lib/ledger.ts`, `DriverEarningsLine`, `RiderReceiptLine`) |
+
+Full endpoint-by-endpoint documentation (method, path, auth, request/response
+shapes, error cases) lives in **[`docs/API.md`](docs/API.md)**.
+
+Two minimal plain HTML/JS web apps live under `web/` — a rider app
+(`web/rider/`) and a driver app (`web/driver/`) — served by the same Express
+process at `/rider/` and `/driver/` (see "Status" below for what they do and
+how to run them).
 
 Cross-module orchestration at ride completion (pricing → EV incentives →
 sponsorships) happens through a hook registry
@@ -128,13 +137,18 @@ rather than by distance, and its route is never patient-chosen from scratch:
 ## Getting started
 
 ```bash
-cp .env.example .env   # point DATABASE_URL at a local Postgres
+cp .env.example .env   # point DATABASE_URL at a local Postgres; optionally set STRIPE_SECRET_KEY (test mode)
 npm install
 npx prisma migrate dev # creates tables + generates the Prisma client
 npx prisma db seed     # seeds the Jacksonville market/zones/service types
 npm run build && npm start
 # or: npm run dev
 ```
+
+The server also serves the two minimal web apps directly — open
+`http://localhost:3000/` for links, or go straight to
+`http://localhost:3000/rider/` or `http://localhost:3000/driver/`. See
+"Status" below for what each one does.
 
 `npm run typecheck` runs `tsc --noEmit` across the whole project.
 
@@ -185,3 +199,112 @@ platform losses, unclamped discounts).
   automatically because `RIDES` only exposes a completion hook today, not a
   start hook — a session currently jumps straight from `ROUTE_SELECTED` to
   `COMPLETED`.
+
+## Status
+
+_Last updated alongside the `claude/finish-pass` PR that added API docs, the
+rider/driver web apps, and Stripe test-mode payments on top of the original
+backend (PR #1)._
+
+### What works end-to-end today
+
+- **The full backend** described above: rides, EV incentives, sponsorships,
+  commerce (catalog/orders/driver-to-rider resale), driver inventory,
+  advertising + ad consent, therapy-rides, and the unified ledger — all with
+  passing tests (`npm test`).
+- **A test rider and a test driver can complete a full, paid ride end to
+  end**: create accounts → driver adds a vehicle and goes online → rider
+  requests a ride → driver sees it, accepts, starts, and completes it →
+  the fare is computed and posted to the ledger → **a Stripe test-mode
+  PaymentIntent is created and confirmed for the fare, and the payment
+  outcome is recorded against the ride**. This is covered by
+  `tests/integration/http-e2e-ride-lifecycle.test.ts` (full HTTP-level
+  walkthrough, Stripe mocked to simulate a successful test-mode charge —
+  see "Known gaps" below for why it's mocked there) and was additionally
+  verified manually against a real running server + real local Postgres
+  with `curl`/a small Python script, including confirming that an
+  **invalid** Stripe key is rejected by Stripe's real API (reachable from
+  this environment) and recorded as a `FAILED` payment without crashing the
+  ride-completion request.
+- **API documentation** for every implemented endpoint: see
+  [`docs/API.md`](docs/API.md).
+- **Rider web app** (`web/rider/`, served at `/rider/`): create/select a
+  test rider, request a ride, see its live status (polls every 3s), and view
+  ride history with fare + payment status.
+- **Driver web app** (`web/driver/`, served at `/driver/`): create/select a
+  test driver, add a vehicle, go online/offline, see and accept an available
+  ride (polls every 3s), start it, and complete it (manually entering trip
+  distance/duration — there's no GPS/telematics integration).
+- **Stripe test-mode payments**: wired into `POST /rides/:id/complete` (see
+  `docs/API.md`'s Payments section and
+  `src/modules/payments/{stripe.ts,ride-fare-payment.ts}`). Reads
+  `STRIPE_SECRET_KEY`/`STRIPE_PUBLISHABLE_KEY` from the environment only
+  (never hardcoded — see `.env.example`), and nothing in this codebase can
+  switch it into live mode.
+
+### What's left / known gaps
+
+- **No authentication system at all** (pre-existing, not introduced by this
+  PR, but now more visible since the web apps make it directly usable): no
+  login, sessions, passwords, or per-role authorization anywhere. The new
+  `accounts` module is explicitly *not* an auth system — it just lets a
+  caller create/select a `Driver`/`Rider` by ID. This must be addressed
+  before any real user or real money touches this system.
+- **Stripe is wired but not yet verified against a real Stripe test
+  account** — see "Needs De'Aris" in the PR description. Without a real
+  `sk_test_...`/`pk_test_...` key pair, ride completion still works, and the
+  charge step logs a warning and skips cleanly (verified above); it has not
+  been run against Stripe's actual test-mode success/decline behavior.
+- The Stripe charge covers `RideFare.riderTotalChargeCents` (the base ride
+  fare) only — it does not yet fold in a rider-funded EV surcharge share
+  (rare `SPLIT`/`RIDER` funding source) or in-ride driver-to-rider product
+  purchases, which post their own separate `Payment` rows today. See
+  `docs/API.md`'s Payments section.
+- The web apps are intentionally minimal (no build step, no framework, no
+  styling system, manual distance/duration entry instead of GPS, polling
+  instead of websockets, driver "available rides" is a flat polled list
+  with no real dispatch/matching). They're an MVP to drive the paid-ride
+  flow end to end, not a production rider/driver experience.
+- Everything else listed under "Notes / known gaps" above (pre-existing,
+  carried over from PR #1): minimal dispatch/fare formula, no tax model, no
+  lat/lng-less radius ad targeting, manual ad spend posting only, and the
+  therapy-rides MVP-scaffold gaps (manual license verification, manual
+  insurance claim settlement, no crisis-escalation protocol, no
+  ride-start hook).
+
+### How to run everything locally
+
+```bash
+# 1. Postgres (dev + test databases)
+createdb rideshareapp
+createdb rideshareapp_test
+
+# 2. Backend
+cp .env.example .env
+#   - point DATABASE_URL at the rideshareapp database above
+#   - optionally set STRIPE_SECRET_KEY / STRIPE_PUBLISHABLE_KEY to a
+#     Stripe TEST key pair (sk_test_.../pk_test_...) to enable real
+#     Stripe test-mode charges on ride completion; leave unset to run
+#     with payments skipped (ride completion still works either way)
+npm install
+npx prisma migrate dev
+npx prisma db seed
+npm run build && npm start   # or: npm run dev
+
+# 3. Web apps — no separate server or build step; the backend serves them
+#    open http://localhost:3000/            (landing page with links)
+#    open http://localhost:3000/rider/       (rider app)
+#    open http://localhost:3000/driver/      (driver app)
+
+# 4. Tests (separate test database)
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/rideshareapp_test?schema=public" \
+  npx prisma migrate deploy
+npm test
+```
+
+### Where it's deployed
+
+**Not deployed anywhere.** There is no hosting, CI/CD, or production
+environment configured for this project — everything above runs locally
+only. (No Vercel/Railway/Supabase/etc. project was requested or created for
+this PR.)

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { RideStatus } from "@prisma/client";
 import { asyncHandler } from "../../lib/http";
 import * as RidesService from "./service";
 
@@ -9,6 +10,24 @@ ridesRouter.post(
   asyncHandler(async (req, res) => {
     const ride = await RidesService.requestRide(req.body);
     res.status(201).json(ride);
+  })
+);
+
+ridesRouter.get(
+  "/",
+  asyncHandler(async (req, res) => {
+    const { riderId, driverId, marketId, status, limit } = req.query as Record<
+      string,
+      string | undefined
+    >;
+    const rides = await RidesService.listRides({
+      riderId,
+      driverId,
+      marketId,
+      status: status as RideStatus | undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
+    res.json(rides);
   })
 );
 
