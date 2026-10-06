@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RideshareApp — Rider</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 24px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; }
+  section { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 0.85rem; color: #555; margin-top: 10px; }
+  input, select, button { font-size: 1rem; padding: 8px; margin-top: 4px; width: 100%; box-sizing: border-box; }
+  button { cursor: pointer; background: #1a73e8; color: white; border: none; border-radius: 6px; margin-top: 12px; }
+  button.secondary { background: #e0e0e0; color: #1a1a1a; }
+  button:disabled { background: #ccc; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; }
+  .row > div { flex: 1; }
+  .status { font-weight: 600; padding: 4px 10px; border-radius: 6px; display: inline-block; }
+  .status.REQUESTED { background: #fff3cd; }
+  .status.ACCEPTED { background: #cfe2ff; }
+  .status.IN_PROGRESS { background: #cfe2ff; }
+  .status.COMPLETED { background: #d1e7dd; }
+  .status.CANCELLED { background: #f8d7da; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #eee; }
+  .muted { color: #777; font-size: 0.85rem; }
+  .error { color: #b02a37; font-size: 0.9rem; }
+  a { color: #1a73e8; }
+</style>
+</head>
+<body>
+  <h1>🚗 Rider app <span class="muted">(test mode)</span></h1>
+  <p><a href="/">← back</a></p>
+
+  <section id="auth-section">
+    <h3>Rider identity</h3>
+    <p class="muted">No login in this MVP — create or paste a test Rider ID.</p>
+    <div id="rider-identity"></div>
+    <div id="create-rider-form">
+      <div class="row">
+        <div><label>Name</label><input id="rider-name" placeholder="Test Rider" /></div>
+        <div><label>Email</label><input id="rider-email" placeholder="rider@test.example" /></div>
+      </div>
+      <button id="create-rider-btn">Create test rider</button>
+      <label>…or use an existing Rider ID</label>
+      <input id="existing-rider-id" placeholder="paste a riderId" />
+      <button class="secondary" id="use-rider-btn">Use this rider</button>
+    </div>
+    <p class="error" id="auth-error"></p>
+  </section>
+
+  <section id="app-section" style="display:none">
+    <p>Signed in as <strong id="rider-label"></strong> <button class="secondary" style="width:auto;margin-left:8px;padding:4px 10px" id="signout-btn">switch rider</button></p>
+
+    <h3>Request a ride</h3>
+    <div class="row">
+      <div><label>Market</label><select id="market-select"></select></div>
+      <div><label>Service type</label><select id="service-select"></select></div>
+    </div>
+    <button id="request-ride-btn">Request ride</button>
+    <p class="error" id="request-error"></p>
+
+    <h3>Current ride</h3>
+    <div id="current-ride">No active ride.</div>
+
+    <h3>Ride history</h3>
+    <div id="history"></div>
+  </section>
+
+<script>
+const API = ""; // same-origin
+const state = {
+  riderId: localStorage.getItem("rideshare.riderId") || null,
+  riderName: localStorage.getItem("rideshare.riderName") || null,
+  currentRideId: localStorage.getItem("rideshare.currentRideId") || null,
+  pollTimer: null,
+};
+
+function $(id) { return document.getElementById(id); }
+
+async function api(path, options) {
+  const res = await fetch(API + path, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options && options.headers) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+  return body;
+}
+
+function money(cents) {
+  if (cents === null || cents === undefined) return "—";
+  return "$" + (cents / 100).toFixed(2);
+}
+
+function saveRider(id, name) {
+  state.riderId = id;
+  state.riderName = name;
+  localStorage.setItem("rideshare.riderId", id);
+  localStorage.setItem("rideshare.riderName", name || "");
+}
+
+function clearRider() {
+  state.riderId = null;
+  state.currentRideId = null;
+  localStorage.removeItem("rideshare.riderId");
+  localStorage.removeItem("rideshare.riderName");
+  localStorage.removeItem("rideshare.currentRideId");
+}
+
+async function loadReferenceData() {
+  const [markets, serviceTypes] = await Promise.all([
+    api("/accounts/markets"),
+    api("/accounts/service-types"),
+  ]);
+  $("market-select").innerHTML = markets.map((m) => `<option value="${m.id}">${m.name}</option>`).join("");
+  $("service-select").innerHTML = serviceTypes.map((s) => `<option value="${s.id}">${s.name}</option>`).join("");
+}
+
+function renderRide(ride) {
+  if (!ride) return "No active ride.";
+  const fare = ride.fare;
+  const payment = (ride.payments || [])[0];
+  let html = `<p><span class="status ${ride.status}">${ride.status}</span> — ride <code>${ride.id}</code></p>`;
+  if (fare) {
+    html += `<p>Fare: ${money(fare.riderTotalChargeCents)} (base ${money(fare.baseFareCents)} + distance ${money(fare.distanceFareCents)} + time ${money(fare.timeFareCents)})</p>`;
+  }
+  if (payment) {
+    html += `<p>Payment: <strong>${payment.status}</strong> via ${payment.method}${payment.processorRef ? ` (ref ${payment.processorRef})` : ""}</p>`;
+  } else if (ride.status === "COMPLETED") {
+    html += `<p class="muted">No payment on file for this ride (Stripe not configured in this environment — see README "Status").</p>`;
+  }
+  if (ride.status === "REQUESTED" || ride.status === "ACCEPTED") {
+    html += `<button class="secondary" style="width:auto;padding:6px 14px" onclick="cancelCurrentRide()">Cancel ride</button>`;
+  }
+  return html;
+}
+
+async function refreshCurrentRide() {
+  if (!state.currentRideId) {
+    $("current-ride").innerHTML = "No active ride.";
+    return;
+  }
+  try {
+    const ride = await api(`/rides/${state.currentRideId}`);
+    $("current-ride").innerHTML = renderRide(ride);
+    if (ride.status === "COMPLETED" || ride.status === "CANCELLED") {
+      localStorage.removeItem("rideshare.currentRideId");
+      refreshHistory();
+    }
+  } catch (e) {
+    $("current-ride").innerHTML = `<p class="error">${e.message}</p>`;
+  }
+}
+
+window.cancelCurrentRide = async function () {
+  if (!state.currentRideId) return;
+  await api(`/rides/${state.currentRideId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ cancelledBy: "RIDER", reason: "Cancelled from rider app" }),
+  });
+  refreshCurrentRide();
+};
+
+async function refreshHistory() {
+  if (!state.riderId) return;
+  const rides = await api(`/rides?riderId=${state.riderId}`);
+  if (!rides.length) {
+    $("history").innerHTML = '<p class="muted">No rides yet.</p>';
+    return;
+  }
+  const rows = rides
+    .map((r) => {
+      const payment = (r.payments || [])[0];
+      return `<tr>
+        <td>${new Date(r.requestedAt).toLocaleString()}</td>
+        <td><span class="status ${r.status}">${r.status}</span></td>
+        <td>${r.fare ? money(r.fare.riderTotalChargeCents) : "—"}</td>
+        <td>${payment ? payment.status : "—"}</td>
+      </tr>`;
+    })
+    .join("");
+  $("history").innerHTML = `<table><tr><th>Requested</th><th>Status</th><th>Fare</th><th>Payment</th></tr>${rows}</table>`;
+}
+
+function startPolling() {
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(() => {
+    refreshCurrentRide();
+  }, 3000);
+}
+
+function showApp() {
+  $("auth-section").style.display = "none";
+  $("app-section").style.display = "block";
+  $("rider-label").textContent = `${state.riderName || "rider"} (${state.riderId})`;
+  loadReferenceData();
+  refreshCurrentRide();
+  refreshHistory();
+  startPolling();
+}
+
+function showAuth() {
+  $("auth-section").style.display = "block";
+  $("app-section").style.display = "none";
+  if (state.pollTimer) clearInterval(state.pollTimer);
+}
+
+$("create-rider-btn").addEventListener("click", async () => {
+  $("auth-error").textContent = "";
+  try {
+    const name = $("rider-name").value.trim() || "Test Rider";
+    const email = $("rider-email").value.trim() || `rider-${Date.now()}@test.example`;
+    const rider = await api("/accounts/riders", { method: "POST", body: JSON.stringify({ name, email }) });
+    saveRider(rider.id, rider.name);
+    showApp();
+  } catch (e) {
+    $("auth-error").textContent = e.message;
+  }
+});
+
+$("use-rider-btn").addEventListener("click", async () => {
+  $("auth-error").textContent = "";
+  try {
+    const id = $("existing-rider-id").value.trim();
+    if (!id) return;
+    const rider = await api(`/accounts/riders/${id}`);
+    saveRider(rider.id, rider.name);
+    showApp();
+  } catch (e) {
+    $("auth-error").textContent = e.message;
+  }
+});
+
+$("signout-btn").addEventListener("click", () => {
+  clearRider();
+  showAuth();
+});
+
+$("request-ride-btn").addEventListener("click", async () => {
+  $("request-error").textContent = "";
+  try {
+    const ride = await api("/rides", {
+      method: "POST",
+      body: JSON.stringify({
+        riderId: state.riderId,
+        marketId: $("market-select").value,
+        serviceTypeId: $("service-select").value,
+      }),
+    });
+    state.currentRideId = ride.id;
+    localStorage.setItem("rideshare.currentRideId", ride.id);
+    refreshCurrentRide();
+  } catch (e) {
+    $("request-error").textContent = e.message;
+  }
+});
+
+if (state.riderId) {
+  showApp();
+} else {
+  showAuth();
+}
+</script>
+</body>
+</html>

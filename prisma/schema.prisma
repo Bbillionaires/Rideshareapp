@@ -18,7 +18,8 @@
 //   SPONSORSHIPS     business-sponsored driver incentive programs
 //   COMMERCE         driver store catalog, orders, driver-to-rider resale
 //   DRIVER_INVENTORY per-driver on-hand stock for resale
-//   PAYMENTS         generic payment/refund processing
+//   PAYMENTS         generic payment/refund processing, incl. the test-mode
+//                    Stripe charge posted for each completed ride's fare
 //   ADVERTISING      campaigns, creatives, targeting, analytics
 //   AD_CONSENT       advertising consent records (distinct from ToS)
 //   THERAPY_RIDES    licensed-therapist ride-along sessions (separate consent,
@@ -48,14 +49,14 @@ model Market {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  zones             Zone[]
-  vehicles          Vehicle[]
-  rides             Ride[]
-  evRules           EvCompensationRule[]
-  sponsorPrograms   SponsorshipProgram[]
-  adTargetRules     AdTargetRule[]
-  onlineSessions    DriverOnlineSession[]
-  therapySessions   TherapySession[]
+  zones           Zone[]
+  vehicles        Vehicle[]
+  rides           Ride[]
+  evRules         EvCompensationRule[]
+  sponsorPrograms SponsorshipProgram[]
+  adTargetRules   AdTargetRule[]
+  onlineSessions  DriverOnlineSession[]
+  therapySessions TherapySession[]
 
   @@map("markets")
 }
@@ -77,9 +78,9 @@ model Zone {
   active    Boolean   @default(true)
   createdAt DateTime  @default(now())
 
-  zipMappings        ZipZoneMapping[]
-  rides              Ride[]
-  adTargetRules      AdTargetRule[]
+  zipMappings         ZipZoneMapping[]
+  rides               Ride[]
+  adTargetRules       AdTargetRule[]
   therapistSafeRoutes TherapistSafeRoute[]
 
   @@unique([marketId, name])
@@ -128,16 +129,16 @@ model Driver {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  vehicles         Vehicle[]
-  rides            Ride[]
-  onlineSessions   DriverOnlineSession[]
-  rideOffers       RideOffer[]
-  inventoryItems   DriverInventoryItem[]
-  storeOrders      Order[]
-  sales            DriverSale[]
-  adConsents       AdConsentRecord[]         @relation("DriverAdConsent")
-  earningsLines    DriverEarningsLine[]
-  ledgerEntries    LedgerEntry[]             @relation("DriverLedgerParty")
+  vehicles       Vehicle[]
+  rides          Ride[]
+  onlineSessions DriverOnlineSession[]
+  rideOffers     RideOffer[]
+  inventoryItems DriverInventoryItem[]
+  storeOrders    Order[]
+  sales          DriverSale[]
+  adConsents     AdConsentRecord[]     @relation("DriverAdConsent")
+  earningsLines  DriverEarningsLine[]
+  ledgerEntries  LedgerEntry[]         @relation("DriverLedgerParty")
 
   @@map("drivers")
 }
@@ -159,26 +160,26 @@ enum VehicleApprovalStatus {
 // approved vehicle record (fuelType == EV && approvalStatus == APPROVED),
 // never from a driver-selected flag. See EvEligibilityService.
 model Vehicle {
-  id             String                 @id @default(cuid())
+  id             String                @id @default(cuid())
   driverId       String
-  driver         Driver                 @relation(fields: [driverId], references: [id])
+  driver         Driver                @relation(fields: [driverId], references: [id])
   marketId       String
-  market         Market                 @relation(fields: [marketId], references: [id])
+  market         Market                @relation(fields: [marketId], references: [id])
   make           String
   model          String
   year           Int
   plate          String
   fuelType       FuelType
-  approvalStatus VehicleApprovalStatus  @default(PENDING)
+  approvalStatus VehicleApprovalStatus @default(PENDING)
   verifiedAt     DateTime?
   verifiedBy     String? // admin user id
-  active         Boolean                @default(true)
-  createdAt      DateTime               @default(now())
-  updatedAt      DateTime               @updatedAt
+  active         Boolean               @default(true)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
 
   rides            Ride[]
   onlineSessions   DriverOnlineSession[]
-  chargingSessions  ChargingSession[]
+  chargingSessions ChargingSession[]
 
   @@index([driverId])
   @@map("vehicles")
@@ -193,7 +194,7 @@ model Rider {
 
   rides                 Ride[]
   purchases             DriverSale[]
-  adConsents            AdConsentRecord[] @relation("RiderAdConsent")
+  adConsents            AdConsentRecord[]      @relation("RiderAdConsent")
   therapyConsentRecords TherapyConsentRecord[]
   therapySessions       TherapySession[]
 
@@ -219,42 +220,43 @@ enum CancelledBy {
 }
 
 model Ride {
-  id             String      @id @default(cuid())
-  riderId        String
-  rider          Rider       @relation(fields: [riderId], references: [id])
-  driverId       String?
-  driver         Driver?     @relation(fields: [driverId], references: [id])
-  vehicleId      String? // snapshot of the vehicle actually used, for EV eligibility at time of trip
-  vehicle        Vehicle?    @relation(fields: [vehicleId], references: [id])
-  marketId       String
-  market         Market      @relation(fields: [marketId], references: [id])
-  zoneId         String? // pickup zone
-  zone           Zone?       @relation(fields: [zoneId], references: [id])
-  pickupZip      String?
-  serviceTypeId  String
-  serviceType    ServiceType @relation(fields: [serviceTypeId], references: [id])
-  status         RideStatus  @default(REQUESTED)
-  distanceMiles  Decimal?    @db.Decimal(8, 2)
+  id              String       @id @default(cuid())
+  riderId         String
+  rider           Rider        @relation(fields: [riderId], references: [id])
+  driverId        String?
+  driver          Driver?      @relation(fields: [driverId], references: [id])
+  vehicleId       String? // snapshot of the vehicle actually used, for EV eligibility at time of trip
+  vehicle         Vehicle?     @relation(fields: [vehicleId], references: [id])
+  marketId        String
+  market          Market       @relation(fields: [marketId], references: [id])
+  zoneId          String? // pickup zone
+  zone            Zone?        @relation(fields: [zoneId], references: [id])
+  pickupZip       String?
+  serviceTypeId   String
+  serviceType     ServiceType  @relation(fields: [serviceTypeId], references: [id])
+  status          RideStatus   @default(REQUESTED)
+  distanceMiles   Decimal?     @db.Decimal(8, 2)
   durationMinutes Int?
-  requestedAt    DateTime    @default(now())
-  acceptedAt     DateTime?
-  startedAt      DateTime?
-  completedAt    DateTime?
-  cancelledAt    DateTime?
-  cancelledBy    CancelledBy?
-  cancelReason   String?
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
+  requestedAt     DateTime     @default(now())
+  acceptedAt      DateTime?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+  cancelledBy     CancelledBy?
+  cancelReason    String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
-  offers            RideOffer[]
-  fare              RideFare?
-  evBonusLineItems  EvBonusLineItem[]
-  sponsorContribs   SponsorshipContribution[]
-  driverSales       DriverSale[]
-  ledgerEntries     LedgerEntry[]
-  earningsLines     DriverEarningsLine[]
-  receiptLines      RiderReceiptLine[]
-  therapySession    TherapySession?
+  offers           RideOffer[]
+  fare             RideFare?
+  evBonusLineItems EvBonusLineItem[]
+  sponsorContribs  SponsorshipContribution[]
+  driverSales      DriverSale[]
+  ledgerEntries    LedgerEntry[]
+  earningsLines    DriverEarningsLine[]
+  receiptLines     RiderReceiptLine[]
+  therapySession   TherapySession?
+  payments         Payment[]
 
   @@index([driverId])
   @@index([riderId])
@@ -274,14 +276,14 @@ enum RideOfferResponse {
 }
 
 model RideOffer {
-  id           String            @id @default(cuid())
-  rideId       String
-  ride         Ride              @relation(fields: [rideId], references: [id])
-  driverId     String
-  driver       Driver            @relation(fields: [driverId], references: [id])
-  offeredAt    DateTime          @default(now())
-  respondedAt  DateTime?
-  response     RideOfferResponse @default(PENDING)
+  id          String            @id @default(cuid())
+  rideId      String
+  ride        Ride              @relation(fields: [rideId], references: [id])
+  driverId    String
+  driver      Driver            @relation(fields: [driverId], references: [id])
+  offeredAt   DateTime          @default(now())
+  respondedAt DateTime?
+  response    RideOfferResponse @default(PENDING)
 
   @@index([driverId])
   @@map("ride_offers")
@@ -328,19 +330,19 @@ model ChargingSession {
 // only summed with driverBaseEarnings at read time (see DriverEarningsService)
 // so pricing never needs to know those modules exist.
 model RideFare {
-  id                    String   @id @default(cuid())
-  rideId                String   @unique
-  ride                  Ride     @relation(fields: [rideId], references: [id])
-  currency              String   @default("USD")
-  baseFareCents         Int
-  distanceFareCents     Int
-  timeFareCents         Int
-  surgeMultiplier       Decimal  @default(1.0) @db.Decimal(4, 2)
-  subtotalFareCents     Int // what the rider is charged for the ride itself, pre-add-ons
+  id                      String   @id @default(cuid())
+  rideId                  String   @unique
+  ride                    Ride     @relation(fields: [rideId], references: [id])
+  currency                String   @default("USD")
+  baseFareCents           Int
+  distanceFareCents       Int
+  timeFareCents           Int
+  surgeMultiplier         Decimal  @default(1.0) @db.Decimal(4, 2)
+  subtotalFareCents       Int // what the rider is charged for the ride itself, pre-add-ons
   platformServiceFeeCents Int
-  riderTotalChargeCents Int
+  riderTotalChargeCents   Int
   driverBaseEarningsCents Int // "standard driver earnings" before EV/sponsorship
-  computedAt            DateTime @default(now())
+  computedAt              DateTime @default(now())
 
   @@map("ride_fares")
 }
@@ -362,29 +364,29 @@ enum EvFundingSource {
 // service type (null = applies to all). Promotional rules stack additively
 // on top of the single best-matching standard rule; see EvBonusEngine.
 model EvCompensationRule {
-  id                     String          @id @default(cuid())
-  name                   String
-  description            String?
-  marketId               String? // null = all markets
-  market                 Market?         @relation(fields: [marketId], references: [id])
-  serviceTypeId          String? // null = all service types
-  serviceType            ServiceType?    @relation(fields: [serviceTypeId], references: [id])
-  flatAmountCents        Int?
-  percentageRate         Decimal?        @db.Decimal(6, 4) // e.g. 0.0800 = 8%
-  perMileAmountCents     Int?
+  id                      String              @id @default(cuid())
+  name                    String
+  description             String?
+  marketId                String? // null = all markets
+  market                  Market?             @relation(fields: [marketId], references: [id])
+  serviceTypeId           String? // null = all service types
+  serviceType             ServiceType?        @relation(fields: [serviceTypeId], references: [id])
+  flatAmountCents         Int?
+  percentageRate          Decimal?            @db.Decimal(6, 4) // e.g. 0.0800 = 8%
+  perMileAmountCents      Int?
   minimumBonusAmountCents Int?
-  fundingSource          EvFundingSource @default(PLATFORM)
-  splitConfig            Json? // e.g. {"platform":0.5,"rider":0.5} or {"platform":0.5,"sponsor":0.5}, required when fundingSource = SPLIT
-  sponsorshipProgramId   String? // required when fundingSource involves SPONSOR (direct or via split)
-  sponsorshipProgram     SponsorshipProgram? @relation(fields: [sponsorshipProgramId], references: [id])
-  isPromotional          Boolean         @default(false)
-  priority               Int             @default(0) // higher wins among equally-specific matches
-  effectiveStartDate     DateTime
-  effectiveEndDate       DateTime?
-  active                 Boolean         @default(true)
-  createdBy              String?
-  createdAt              DateTime        @default(now())
-  updatedAt              DateTime        @updatedAt
+  fundingSource           EvFundingSource     @default(PLATFORM)
+  splitConfig             Json? // e.g. {"platform":0.5,"rider":0.5} or {"platform":0.5,"sponsor":0.5}, required when fundingSource = SPLIT
+  sponsorshipProgramId    String? // required when fundingSource involves SPONSOR (direct or via split)
+  sponsorshipProgram      SponsorshipProgram? @relation(fields: [sponsorshipProgramId], references: [id])
+  isPromotional           Boolean             @default(false)
+  priority                Int                 @default(0) // higher wins among equally-specific matches
+  effectiveStartDate      DateTime
+  effectiveEndDate        DateTime?
+  active                  Boolean             @default(true)
+  createdBy               String?
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
 
   lineItems EvBonusLineItem[]
 
@@ -396,25 +398,25 @@ model EvCompensationRule {
 // stacked promotional rules). This is the authoritative record shown on both
 // the rider receipt and the driver earnings ledger as the "EV component."
 model EvBonusLineItem {
-  id                       String          @id @default(cuid())
-  rideId                   String
-  ride                     Ride            @relation(fields: [rideId], references: [id])
-  ruleId                   String
-  rule                     EvCompensationRule @relation(fields: [ruleId], references: [id])
-  ruleNameSnapshot         String
-  isPromotional            Boolean
-  flatComponentCents       Int             @default(0)
-  percentageComponentCents Int             @default(0)
-  perMileComponentCents    Int             @default(0)
-  minimumFloorAppliedCents Int? // set when the floor overrode the summed components
-  totalAmountCents         Int
-  fundingSource            EvFundingSource
-  fundedByPlatformCents    Int             @default(0)
-  fundedByRiderCents       Int             @default(0)
-  fundedBySponsorCents     Int             @default(0)
+  id                        String                   @id @default(cuid())
+  rideId                    String
+  ride                      Ride                     @relation(fields: [rideId], references: [id])
+  ruleId                    String
+  rule                      EvCompensationRule       @relation(fields: [ruleId], references: [id])
+  ruleNameSnapshot          String
+  isPromotional             Boolean
+  flatComponentCents        Int                      @default(0)
+  percentageComponentCents  Int                      @default(0)
+  perMileComponentCents     Int                      @default(0)
+  minimumFloorAppliedCents  Int? // set when the floor overrode the summed components
+  totalAmountCents          Int
+  fundingSource             EvFundingSource
+  fundedByPlatformCents     Int                      @default(0)
+  fundedByRiderCents        Int                      @default(0)
+  fundedBySponsorCents      Int                      @default(0)
   sponsorshipContributionId String?
-  sponsorshipContribution  SponsorshipContribution? @relation(fields: [sponsorshipContributionId], references: [id])
-  createdAt                DateTime        @default(now())
+  sponsorshipContribution   SponsorshipContribution? @relation(fields: [sponsorshipContributionId], references: [id])
+  createdAt                 DateTime                 @default(now())
 
   ledgerEntries LedgerEntry[]
   earningsLines DriverEarningsLine[]
@@ -454,26 +456,26 @@ enum SponsorshipProgramStatus {
 }
 
 model SponsorshipProgram {
-  id                     String                      @id @default(cuid())
-  sponsorId              String
-  sponsor                Sponsor                     @relation(fields: [sponsorId], references: [id])
-  name                   String // e.g. "EV DRIVER BONUS — Sponsored by Acme"
-  description            String?
-  contributionType       SponsorshipContributionType
+  id                      String                      @id @default(cuid())
+  sponsorId               String
+  sponsor                 Sponsor                     @relation(fields: [sponsorId], references: [id])
+  name                    String // e.g. "EV DRIVER BONUS — Sponsored by Acme"
+  description             String?
+  contributionType        SponsorshipContributionType
   contributionAmountCents Int? // used when FLAT_PER_TRIP
-  contributionPercentage Decimal?                    @db.Decimal(6, 4) // used when PERCENTAGE
-  evOnly                 Boolean                     @default(true)
-  marketId               String?
-  market                 Market?                     @relation(fields: [marketId], references: [id])
-  serviceTypeId          String?
-  serviceType            ServiceType?                @relation(fields: [serviceTypeId], references: [id])
+  contributionPercentage  Decimal?                    @db.Decimal(6, 4) // used when PERCENTAGE
+  evOnly                  Boolean                     @default(true)
+  marketId                String?
+  market                  Market?                     @relation(fields: [marketId], references: [id])
+  serviceTypeId           String?
+  serviceType             ServiceType?                @relation(fields: [serviceTypeId], references: [id])
   budgetTotalCents        Int
   budgetSpentCents        Int                         @default(0)
-  startDate              DateTime
-  endDate                DateTime?
-  status                 SponsorshipProgramStatus     @default(DRAFT)
-  createdAt              DateTime                     @default(now())
-  updatedAt              DateTime                     @updatedAt
+  startDate               DateTime
+  endDate                 DateTime?
+  status                  SponsorshipProgramStatus    @default(DRAFT)
+  createdAt               DateTime                    @default(now())
+  updatedAt               DateTime                    @updatedAt
 
   evRules       EvCompensationRule[]
   contributions SponsorshipContribution[]
@@ -482,14 +484,14 @@ model SponsorshipProgram {
 }
 
 model SponsorshipContribution {
-  id            String   @id @default(cuid())
-  programId     String
-  program       SponsorshipProgram @relation(fields: [programId], references: [id])
-  rideId        String
-  ride          Ride     @relation(fields: [rideId], references: [id])
-  driverId      String
-  amountCents   Int
-  occurredAt    DateTime @default(now())
+  id          String             @id @default(cuid())
+  programId   String
+  program     SponsorshipProgram @relation(fields: [programId], references: [id])
+  rideId      String
+  ride        Ride               @relation(fields: [rideId], references: [id])
+  driverId    String
+  amountCents Int
+  occurredAt  DateTime           @default(now())
 
   evBonusLineItems EvBonusLineItem[]
   ledgerEntries    LedgerEntry[]
@@ -504,16 +506,16 @@ model SponsorshipContribution {
 // ----------------------------------------------------------------------------
 
 model ProductCategory {
-  id               String   @id @default(cuid())
-  name             String   @unique
-  slug             String   @unique
-  description      String?
-  ageRestricted    Boolean  @default(false)
-  regulatedCategory Boolean @default(false) // reserved; MVP disables sale in these categories entirely
-  active           Boolean  @default(true)
-  createdAt        DateTime @default(now())
+  id                String   @id @default(cuid())
+  name              String   @unique
+  slug              String   @unique
+  description       String?
+  ageRestricted     Boolean  @default(false)
+  regulatedCategory Boolean  @default(false) // reserved; MVP disables sale in these categories entirely
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now())
 
-  products     Product[]
+  products        Product[]
   commissionRules CommissionRule[]
 
   @@map("product_categories")
@@ -527,32 +529,32 @@ enum ProductStatus {
 }
 
 model Product {
-  id                    String        @id @default(cuid())
-  sku                   String        @unique
-  name                  String
-  description           String?
-  categoryId            String
-  category              ProductCategory @relation(fields: [categoryId], references: [id])
-  priceCents            Int
-  platformCostCents     Int // platform's wholesale cost, used to compute platform profit
-  currency              String        @default("USD")
-  status                ProductStatus @default(ACTIVE)
-  resaleEligible        Boolean       @default(false) // must be explicitly designated for driver-to-rider resale
-  requiresSealedPackaging Boolean     @default(true)
-  ageRestricted         Boolean       @default(false)
-  expiresAt             DateTime? // per-batch expiration is tracked on InventoryStock/DriverInventoryItem lots in a fuller model; this is a simple product-level default
-  createdBy             String?
-  createdAt             DateTime      @default(now())
-  updatedAt             DateTime      @updatedAt
+  id                      String          @id @default(cuid())
+  sku                     String          @unique
+  name                    String
+  description             String?
+  categoryId              String
+  category                ProductCategory @relation(fields: [categoryId], references: [id])
+  priceCents              Int
+  platformCostCents       Int // platform's wholesale cost, used to compute platform profit
+  currency                String          @default("USD")
+  status                  ProductStatus   @default(ACTIVE)
+  resaleEligible          Boolean         @default(false) // must be explicitly designated for driver-to-rider resale
+  requiresSealedPackaging Boolean         @default(true)
+  ageRestricted           Boolean         @default(false)
+  expiresAt               DateTime? // per-batch expiration is tracked on InventoryStock/DriverInventoryItem lots in a fuller model; this is a simple product-level default
+  createdBy               String?
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
 
-  images           ProductImage[]
-  inventoryStock   InventoryStock[]
-  driverInventory  DriverInventoryItem[]
-  orderItems       OrderItem[]
-  bundleItems      BundleItem[]
-  discounts        Discount[]
-  driverSales      DriverSale[]
-  commissionRules  CommissionRule[]
+  images          ProductImage[]
+  inventoryStock  InventoryStock[]
+  driverInventory DriverInventoryItem[]
+  orderItems      OrderItem[]
+  bundleItems     BundleItem[]
+  discounts       Discount[]
+  driverSales     DriverSale[]
+  commissionRules CommissionRule[]
 
   @@index([status])
   @@index([resaleEligible])
@@ -577,20 +579,20 @@ enum DiscountType {
 }
 
 model Discount {
-  id               String       @id @default(cuid())
-  code             String?      @unique // null = automatic, always applied within window
-  name             String
-  type             DiscountType
-  value            Decimal      @db.Decimal(10, 4) // percentage as 0-1, or fixed cents as whole number cast to Decimal
-  productId        String?
-  product          Product?     @relation(fields: [productId], references: [id])
-  categoryId       String?
-  startsAt         DateTime
-  endsAt           DateTime?
-  active           Boolean      @default(true)
-  usageLimit       Int?
-  usageCount       Int          @default(0)
-  createdAt        DateTime     @default(now())
+  id         String       @id @default(cuid())
+  code       String?      @unique // null = automatic, always applied within window
+  name       String
+  type       DiscountType
+  value      Decimal      @db.Decimal(10, 4) // percentage as 0-1, or fixed cents as whole number cast to Decimal
+  productId  String?
+  product    Product?     @relation(fields: [productId], references: [id])
+  categoryId String?
+  startsAt   DateTime
+  endsAt     DateTime?
+  active     Boolean      @default(true)
+  usageLimit Int?
+  usageCount Int          @default(0)
+  createdAt  DateTime     @default(now())
 
   @@map("discounts")
 }
@@ -633,15 +635,15 @@ model InventoryLocation {
 }
 
 model InventoryStock {
-  id                String            @id @default(cuid())
-  productId         String
-  product           Product           @relation(fields: [productId], references: [id])
-  locationId        String
-  location          InventoryLocation @relation(fields: [locationId], references: [id])
-  quantityOnHand    Int               @default(0)
-  quantityReserved  Int               @default(0)
-  reorderThreshold  Int               @default(0)
-  updatedAt         DateTime          @updatedAt
+  id               String            @id @default(cuid())
+  productId        String
+  product          Product           @relation(fields: [productId], references: [id])
+  locationId       String
+  location         InventoryLocation @relation(fields: [locationId], references: [id])
+  quantityOnHand   Int               @default(0)
+  quantityReserved Int               @default(0)
+  reorderThreshold Int               @default(0)
+  updatedAt        DateTime          @updatedAt
 
   @@unique([productId, locationId])
   @@map("inventory_stock")
@@ -664,21 +666,21 @@ enum OrderStatus {
 // and/or to restock DriverInventory). Distinct from DriverSale, which is
 // the driver-to-rider resale transaction.
 model Order {
-  id              String      @id @default(cuid())
-  buyerDriverId   String
-  buyerDriver     Driver      @relation(fields: [buyerDriverId], references: [id])
-  status          OrderStatus @default(PENDING)
-  subtotalCents   Int
-  discountCents   Int         @default(0)
-  taxCents        Int         @default(0)
-  totalCents      Int
-  currency        String      @default("USD")
-  placedAt        DateTime    @default(now())
-  fulfilledAt     DateTime?
+  id            String      @id @default(cuid())
+  buyerDriverId String
+  buyerDriver   Driver      @relation(fields: [buyerDriverId], references: [id])
+  status        OrderStatus @default(PENDING)
+  subtotalCents Int
+  discountCents Int         @default(0)
+  taxCents      Int         @default(0)
+  totalCents    Int
+  currency      String      @default("USD")
+  placedAt      DateTime    @default(now())
+  fulfilledAt   DateTime?
 
-  items        OrderItem[]
-  payments     Payment[]
-  fulfillments Fulfillment[]
+  items         OrderItem[]
+  payments      Payment[]
+  fulfillments  Fulfillment[]
   ledgerEntries LedgerEntry[]
 
   @@index([buyerDriverId])
@@ -736,16 +738,16 @@ enum CommissionType {
 }
 
 model CommissionRule {
-  id                String          @id @default(cuid())
-  productId         String?
-  product           Product?        @relation(fields: [productId], references: [id])
-  categoryId        String?
-  category          ProductCategory? @relation(fields: [categoryId], references: [id])
-  type              CommissionType
-  value             Decimal         @db.Decimal(10, 4) // percentage as 0-1, or flat cents cast to Decimal
-  active            Boolean         @default(true)
-  effectiveStart    DateTime        @default(now())
-  effectiveEnd      DateTime?
+  id             String           @id @default(cuid())
+  productId      String?
+  product        Product?         @relation(fields: [productId], references: [id])
+  categoryId     String?
+  category       ProductCategory? @relation(fields: [categoryId], references: [id])
+  type           CommissionType
+  value          Decimal          @db.Decimal(10, 4) // percentage as 0-1, or flat cents cast to Decimal
+  active         Boolean          @default(true)
+  effectiveStart DateTime         @default(now())
+  effectiveEnd   DateTime?
 
   @@map("commission_rules")
 }
@@ -759,31 +761,31 @@ enum DriverSaleStatus {
 }
 
 model DriverSale {
-  id                      String           @id @default(cuid())
-  productId               String
-  product                 Product          @relation(fields: [productId], references: [id])
-  skuSnapshot             String
-  driverId                String
-  driver                  Driver           @relation(fields: [driverId], references: [id])
-  riderId                 String
-  rider                   Rider            @relation(fields: [riderId], references: [id])
-  rideId                  String
-  ride                    Ride             @relation(fields: [rideId], references: [id])
-  quantity                Int
-  unitSalePriceCents      Int
-  totalSalePriceCents     Int
-  unitPlatformCostCents   Int
-  totalPlatformCostCents  Int
-  driverCommissionCents   Int
-  platformProfitCents     Int
-  paymentId               String?
-  payment                 Payment?         @relation(fields: [paymentId], references: [id])
-  status                  DriverSaleStatus @default(COMPLETED)
-  createdAt               DateTime         @default(now())
+  id                     String           @id @default(cuid())
+  productId              String
+  product                Product          @relation(fields: [productId], references: [id])
+  skuSnapshot            String
+  driverId               String
+  driver                 Driver           @relation(fields: [driverId], references: [id])
+  riderId                String
+  rider                  Rider            @relation(fields: [riderId], references: [id])
+  rideId                 String
+  ride                   Ride             @relation(fields: [rideId], references: [id])
+  quantity               Int
+  unitSalePriceCents     Int
+  totalSalePriceCents    Int
+  unitPlatformCostCents  Int
+  totalPlatformCostCents Int
+  driverCommissionCents  Int
+  platformProfitCents    Int
+  paymentId              String?
+  payment                Payment?         @relation(fields: [paymentId], references: [id])
+  status                 DriverSaleStatus @default(COMPLETED)
+  createdAt              DateTime         @default(now())
 
-  ledgerEntries  LedgerEntry[]
-  earningsLines  DriverEarningsLine[]
-  receiptLines   RiderReceiptLine[]
+  ledgerEntries LedgerEntry[]
+  earningsLines DriverEarningsLine[]
+  receiptLines  RiderReceiptLine[]
 
   @@index([driverId])
   @@index([riderId])
@@ -798,15 +800,15 @@ model DriverSale {
 // A driver's on-hand stock, decremented automatically on each DriverSale.
 // Drivers can mark items unavailable without deleting them.
 model DriverInventoryItem {
-  id                 String   @id @default(cuid())
+  id                 String    @id @default(cuid())
   driverId           String
-  driver             Driver   @relation(fields: [driverId], references: [id])
+  driver             Driver    @relation(fields: [driverId], references: [id])
   productId          String
-  product            Product  @relation(fields: [productId], references: [id])
-  quantityOnHand     Int      @default(0)
-  isAvailableForSale Boolean  @default(true)
+  product            Product   @relation(fields: [productId], references: [id])
+  quantityOnHand     Int       @default(0)
+  isAvailableForSale Boolean   @default(true)
   lastRestockedAt    DateTime?
-  updatedAt          DateTime @updatedAt
+  updatedAt          DateTime  @updatedAt
 
   @@unique([driverId, productId])
   @@map("driver_inventory_items")
@@ -833,23 +835,30 @@ enum PaymentStatus {
 // Generic payment record used across ride fares, commerce orders, and
 // driver-to-rider resale — riders never hand card details to the driver.
 model Payment {
-  id            String        @id @default(cuid())
-  payerType     PayerType
-  payerId       String
-  orderId       String?
-  order         Order?        @relation(fields: [orderId], references: [id])
-  amountCents   Int
-  currency      String        @default("USD")
-  method        String // e.g. CARD_ON_FILE, WALLET
-  processorRef  String?
-  status        PaymentStatus @default(AUTHORIZED)
-  capturedAt    DateTime?
-  createdAt     DateTime      @default(now())
+  id           String        @id @default(cuid())
+  payerType    PayerType
+  payerId      String
+  orderId      String?
+  order        Order?        @relation(fields: [orderId], references: [id])
+  // Set when this payment is the Stripe (test-mode) charge for a completed
+  // ride's fare (see STRIPE_PAYMENTS / src/modules/payments/stripe.ts).
+  // Distinct from orderId (driver-store purchases) — a ride fare payment is
+  // never attached to an Order.
+  rideId       String?
+  ride         Ride?         @relation(fields: [rideId], references: [id])
+  amountCents  Int
+  currency     String        @default("USD")
+  method       String // e.g. CARD_ON_FILE, WALLET, STRIPE_CARD
+  processorRef String? // e.g. Stripe PaymentIntent id (pi_...)
+  status       PaymentStatus @default(AUTHORIZED)
+  capturedAt   DateTime?
+  createdAt    DateTime      @default(now())
 
-  refunds     Refund[]
-  driverSales DriverSale[]
+  refunds       Refund[]
+  driverSales   DriverSale[]
   ledgerEntries LedgerEntry[]
 
+  @@index([rideId])
   @@map("payments")
 }
 
@@ -907,22 +916,22 @@ enum AdPlacementSlot {
 }
 
 model AdCampaign {
-  id                   String           @id @default(cuid())
-  advertiserId         String
-  advertiser           Advertiser       @relation(fields: [advertiserId], references: [id])
-  name                 String
-  status               AdCampaignStatus @default(DRAFT)
-  budgetTotalCents     Int
-  budgetSpentCents     Int              @default(0)
-  startDate            DateTime
-  endDate              DateTime?
-  frequencyCapCount    Int? // max impressions per user...
-  frequencyCapPeriod   String? // ...per period, e.g. "DAILY", "CAMPAIGN"
-  destinationUrl       String?
-  promoCode            String?
-  createdBy            String?
-  createdAt            DateTime         @default(now())
-  updatedAt            DateTime         @updatedAt
+  id                 String           @id @default(cuid())
+  advertiserId       String
+  advertiser         Advertiser       @relation(fields: [advertiserId], references: [id])
+  name               String
+  status             AdCampaignStatus @default(DRAFT)
+  budgetTotalCents   Int
+  budgetSpentCents   Int              @default(0)
+  startDate          DateTime
+  endDate            DateTime?
+  frequencyCapCount  Int? // max impressions per user...
+  frequencyCapPeriod String? // ...per period, e.g. "DAILY", "CAMPAIGN"
+  destinationUrl     String?
+  promoCode          String?
+  createdBy          String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
 
   creatives     AdCreative[]
   placements    AdCampaignPlacement[]
@@ -1007,19 +1016,19 @@ enum AdViewerType {
 
 // Aggregated analytics only — never a feed of raw rider location history.
 model AdImpression {
-  id               String          @id @default(cuid())
-  campaignId       String
-  campaign         AdCampaign      @relation(fields: [campaignId], references: [id])
-  creativeId       String
-  creative         AdCreative      @relation(fields: [creativeId], references: [id])
-  placement        AdPlacementSlot
-  viewerType       AdViewerType
-  viewerId         String
-  marketId         String?
-  zoneId           String?
-  zip              String?
-  isUniqueForViewer Boolean        @default(false)
-  occurredAt       DateTime        @default(now())
+  id                String          @id @default(cuid())
+  campaignId        String
+  campaign          AdCampaign      @relation(fields: [campaignId], references: [id])
+  creativeId        String
+  creative          AdCreative      @relation(fields: [creativeId], references: [id])
+  placement         AdPlacementSlot
+  viewerType        AdViewerType
+  viewerId          String
+  marketId          String?
+  zoneId            String?
+  zip               String?
+  isUniqueForViewer Boolean         @default(false)
+  occurredAt        DateTime        @default(now())
 
   clicks AdClick[]
 
@@ -1041,27 +1050,27 @@ model AdClick {
 }
 
 model AdConversion {
-  id             String   @id @default(cuid())
+  id             String     @id @default(cuid())
   campaignId     String
   campaign       AdCampaign @relation(fields: [campaignId], references: [id])
   conversionType String // PROMO_CODE_REDEEMED, SIGNUP, PURCHASE
   referenceId    String?
   amountCents    Int?
-  occurredAt     DateTime @default(now())
+  occurredAt     DateTime   @default(now())
 
   @@index([campaignId, occurredAt])
   @@map("ad_conversions")
 }
 
 model PromoCodeRedemption {
-  id           String   @id @default(cuid())
-  campaignId   String
-  campaign     AdCampaign @relation(fields: [campaignId], references: [id])
-  promoCode    String
-  userId       String
-  userType     AdViewerType
-  redeemedAt   DateTime @default(now())
-  referenceId  String? // e.g. orderId or rideId the redemption applied to
+  id          String       @id @default(cuid())
+  campaignId  String
+  campaign    AdCampaign   @relation(fields: [campaignId], references: [id])
+  promoCode   String
+  userId      String
+  userType    AdViewerType
+  redeemedAt  DateTime     @default(now())
+  referenceId String? // e.g. orderId or rideId the redemption applied to
 
   @@index([campaignId])
   @@map("promo_code_redemptions")
@@ -1086,18 +1095,18 @@ enum AdConsentStatus {
 // never be read as advertising consent. One row per (user, consentType)
 // state transition, so history is fully auditable.
 model AdConsentRecord {
-  id             String          @id @default(cuid())
-  driverId       String?
-  driver         Driver?         @relation("DriverAdConsent", fields: [driverId], references: [id])
-  riderId        String?
-  rider          Rider?          @relation("RiderAdConsent", fields: [riderId], references: [id])
-  consentType    AdConsentType
-  status         AdConsentStatus
-  policyVersion  String
-  grantedAt      DateTime?
-  withdrawnAt    DateTime?
-  sourceScreen   String?
-  createdAt      DateTime        @default(now())
+  id            String          @id @default(cuid())
+  driverId      String?
+  driver        Driver?         @relation("DriverAdConsent", fields: [driverId], references: [id])
+  riderId       String?
+  rider         Rider?          @relation("RiderAdConsent", fields: [riderId], references: [id])
+  consentType   AdConsentType
+  status        AdConsentStatus
+  policyVersion String
+  grantedAt     DateTime?
+  withdrawnAt   DateTime?
+  sourceScreen  String?
+  createdAt     DateTime        @default(now())
 
   @@index([driverId])
   @@index([riderId])
@@ -1105,11 +1114,11 @@ model AdConsentRecord {
 }
 
 model TermsOfServiceAcceptance {
-  id            String   @id @default(cuid())
+  id            String       @id @default(cuid())
   userId        String
   userType      AdViewerType
   policyVersion String
-  acceptedAt    DateTime @default(now())
+  acceptedAt    DateTime     @default(now())
 
   @@map("tos_acceptances")
 }
@@ -1345,37 +1354,37 @@ enum LedgerPartyType {
 // issued as a new offsetting entry (e.g. a REFUND row), so the ledger always
 // reconstructs full history.
 model LedgerEntry {
-  id            String          @id @default(cuid())
-  entryType     LedgerEntryType
-  sourceModule  BoundedModule
-  direction     LedgerDirection
-  partyType     LedgerPartyType
-  partyId       String? // polymorphic: driverId / riderId / advertiserId / sponsorId; null for PLATFORM
-  driverId      String? // denormalized for fast per-driver ledger queries when partyType = DRIVER
-  driver        Driver?         @relation("DriverLedgerParty", fields: [driverId], references: [id])
-  amountCents   Int // always positive; direction + partyType convey flow
-  currency      String          @default("USD")
+  id           String          @id @default(cuid())
+  entryType    LedgerEntryType
+  sourceModule BoundedModule
+  direction    LedgerDirection
+  partyType    LedgerPartyType
+  partyId      String? // polymorphic: driverId / riderId / advertiserId / sponsorId; null for PLATFORM
+  driverId     String? // denormalized for fast per-driver ledger queries when partyType = DRIVER
+  driver       Driver?         @relation("DriverLedgerParty", fields: [driverId], references: [id])
+  amountCents  Int // always positive; direction + partyType convey flow
+  currency     String          @default("USD")
 
-  rideId                     String?
-  ride                       Ride?                     @relation(fields: [rideId], references: [id])
-  orderId                    String?
-  order                      Order?                    @relation(fields: [orderId], references: [id])
-  driverSaleId               String?
-  driverSale                 DriverSale?               @relation(fields: [driverSaleId], references: [id])
-  evBonusLineItemId          String?
-  evBonusLineItem            EvBonusLineItem?          @relation(fields: [evBonusLineItemId], references: [id])
-  sponsorshipContributionId  String?
-  sponsorshipContribution    SponsorshipContribution?  @relation(fields: [sponsorshipContributionId], references: [id])
-  adCampaignId               String?
-  adCampaign                 AdCampaign?               @relation(fields: [adCampaignId], references: [id])
-  paymentId                  String?
-  payment                    Payment?                  @relation(fields: [paymentId], references: [id])
-  refundId                   String?
-  refund                     Refund?                   @relation(fields: [refundId], references: [id])
-  therapySessionId           String?
-  therapySession             TherapySession?           @relation(fields: [therapySessionId], references: [id])
-  insuranceClaimId           String?
-  insuranceClaim             InsuranceClaim?           @relation(fields: [insuranceClaimId], references: [id])
+  rideId                    String?
+  ride                      Ride?                    @relation(fields: [rideId], references: [id])
+  orderId                   String?
+  order                     Order?                   @relation(fields: [orderId], references: [id])
+  driverSaleId              String?
+  driverSale                DriverSale?              @relation(fields: [driverSaleId], references: [id])
+  evBonusLineItemId         String?
+  evBonusLineItem           EvBonusLineItem?         @relation(fields: [evBonusLineItemId], references: [id])
+  sponsorshipContributionId String?
+  sponsorshipContribution   SponsorshipContribution? @relation(fields: [sponsorshipContributionId], references: [id])
+  adCampaignId              String?
+  adCampaign                AdCampaign?              @relation(fields: [adCampaignId], references: [id])
+  paymentId                 String?
+  payment                   Payment?                 @relation(fields: [paymentId], references: [id])
+  refundId                  String?
+  refund                    Refund?                  @relation(fields: [refundId], references: [id])
+  therapySessionId          String?
+  therapySession            TherapySession?          @relation(fields: [therapySessionId], references: [id])
+  insuranceClaimId          String?
+  insuranceClaim            InsuranceClaim?          @relation(fields: [insuranceClaimId], references: [id])
 
   description String?
   occurredAt  DateTime @default(now())
@@ -1402,21 +1411,21 @@ enum DriverEarningsLineType {
 // the "Standard driver earnings / EV supplement / Total driver earnings"
 // breakdown can be queried cheaply. LedgerEntry remains the source of truth.
 model DriverEarningsLine {
-  id             String                 @id @default(cuid())
-  driverId       String
-  driver         Driver                 @relation(fields: [driverId], references: [id])
-  rideId         String?
-  ride           Ride?                  @relation(fields: [rideId], references: [id])
-  lineType       DriverEarningsLineType
-  amountCents    Int
-  description    String?
-  ledgerEntryId  String
-  ledgerEntry    LedgerEntry            @relation(fields: [ledgerEntryId], references: [id])
+  id                String                 @id @default(cuid())
+  driverId          String
+  driver            Driver                 @relation(fields: [driverId], references: [id])
+  rideId            String?
+  ride              Ride?                  @relation(fields: [rideId], references: [id])
+  lineType          DriverEarningsLineType
+  amountCents       Int
+  description       String?
+  ledgerEntryId     String
+  ledgerEntry       LedgerEntry            @relation(fields: [ledgerEntryId], references: [id])
   evBonusLineItemId String?
-  evBonusLineItem   EvBonusLineItem?    @relation(fields: [evBonusLineItemId], references: [id])
-  driverSaleId   String?
-  driverSale     DriverSale?            @relation(fields: [driverSaleId], references: [id])
-  createdAt      DateTime               @default(now())
+  evBonusLineItem   EvBonusLineItem?       @relation(fields: [evBonusLineItemId], references: [id])
+  driverSaleId      String?
+  driverSale        DriverSale?            @relation(fields: [driverSaleId], references: [id])
+  createdAt         DateTime               @default(now())
 
   @@index([driverId])
   @@index([rideId])
@@ -1434,19 +1443,19 @@ enum RiderReceiptLineType {
 // Rider-facing receipt view, same rationale as DriverEarningsLine: the EV
 // component must be clearly and separately identified on the receipt.
 model RiderReceiptLine {
-  id             String               @id @default(cuid())
-  rideId         String
-  ride           Ride                 @relation(fields: [rideId], references: [id])
-  lineType       RiderReceiptLineType
-  amountCents    Int
-  description    String?
-  ledgerEntryId  String
-  ledgerEntry    LedgerEntry          @relation(fields: [ledgerEntryId], references: [id])
+  id                String               @id @default(cuid())
+  rideId            String
+  ride              Ride                 @relation(fields: [rideId], references: [id])
+  lineType          RiderReceiptLineType
+  amountCents       Int
+  description       String?
+  ledgerEntryId     String
+  ledgerEntry       LedgerEntry          @relation(fields: [ledgerEntryId], references: [id])
   evBonusLineItemId String?
-  evBonusLineItem   EvBonusLineItem?  @relation(fields: [evBonusLineItemId], references: [id])
-  driverSaleId   String?
-  driverSale     DriverSale?          @relation(fields: [driverSaleId], references: [id])
-  createdAt      DateTime             @default(now())
+  evBonusLineItem   EvBonusLineItem?     @relation(fields: [evBonusLineItemId], references: [id])
+  driverSaleId      String?
+  driverSale        DriverSale?          @relation(fields: [driverSaleId], references: [id])
+  createdAt         DateTime             @default(now())
 
   @@index([rideId])
   @@map("rider_receipt_lines")

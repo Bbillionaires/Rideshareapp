@@ -2,6 +2,7 @@ import { CancelledBy, RideStatus } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { badRequest, notFound } from "../../lib/http";
 import { computeAndPostRideFare } from "../pricing/service";
+import { chargeRideFareWithStripe } from "../payments/ride-fare-payment";
 import { runRideCompletionHooks } from "./hooks";
 
 export async function requestRide(input: {
@@ -58,8 +59,16 @@ export async function completeRide(
 
   // PRICING always runs first: it establishes driverBaseEarningsCents, which
   // EV_INCENTIVES and SPONSORSHIPS hooks below read and add to.
-  await computeAndPostRideFare(ride);
+  const fare = await computeAndPostRideFare(ride);
   await runRideCompletionHooks(ride);
+
+  // STRIPE (test-mode only): settles the rider's charge for the base fare.
+  // Never allowed to fail ride completion itself — see ride-fare-payment.ts.
+  try {
+    await chargeRideFareWithStripe(ride, fare);
+  } catch (err) {
+    console.error(`STRIPE: unexpected error settling payment for ride ${ride.id}:`, err);
+  }
 
   return ride;
 }
@@ -86,8 +95,36 @@ export async function getRide(rideId: string) {
       driverSales: true,
       receiptLines: true,
       earningsLines: true,
+      payments: true,
     },
   });
   if (!ride) notFound(`Ride ${rideId} not found`);
   return ride;
+}
+
+/**
+ * Powers both the rider "ride history" view (riderId filter) and the driver
+ * "available rides" view (status=REQUESTED + marketId filter) — there's no
+ * separate dispatch/matching queue in this MVP, so a driver going online
+ * simply polls this with status=REQUESTED for their market.
+ */
+export async function listRides(filters: {
+  riderId?: string;
+  driverId?: string;
+  marketId?: string;
+  status?: RideStatus;
+  limit?: number;
+}) {
+  const take = filters.limit && filters.limit > 0 && filters.limit <= 100 ? filters.limit : 50;
+  return prisma.ride.findMany({
+    where: {
+      riderId: filters.riderId,
+      driverId: filters.driverId,
+      marketId: filters.marketId,
+      status: filters.status,
+    },
+    include: { fare: true, payments: true },
+    orderBy: { requestedAt: "desc" },
+    take,
+  });
 }

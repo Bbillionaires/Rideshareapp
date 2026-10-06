@@ -14,6 +14,7 @@ export interface CreatePaymentInput {
   payerType: PayerType;
   payerId: string;
   orderId?: string | null;
+  rideId?: string | null;
   amountCents: number;
   method: string;
   status?: PaymentStatus;
@@ -32,6 +33,7 @@ export async function createPayment(tx: PrismaTx, input: CreatePaymentInput): Pr
       payerType: input.payerType,
       payerId: input.payerId,
       orderId: input.orderId ?? null,
+      rideId: input.rideId ?? null,
       amountCents: input.amountCents,
       currency: input.currency ?? "USD",
       method: input.method,

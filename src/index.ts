@@ -1,3 +1,4 @@
+import path from "path";
 import express, { NextFunction, Request, Response } from "express";
 import "./bootstrap";
 import { HttpError } from "./lib/http";
@@ -9,6 +10,7 @@ import { driverInventoryRouter } from "./modules/driver-inventory/routes";
 import { advertisingRouter } from "./modules/advertising/routes";
 import { adConsentRouter } from "./modules/ad-consent/routes";
 import { therapyRidesRouter } from "./modules/therapy-rides/routes";
+import { accountsRouter } from "./modules/accounts/routes";
 
 export function createApp() {
   const app = express();
@@ -16,6 +18,7 @@ export function createApp() {
 
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
+  app.use("/accounts", accountsRouter);
   app.use("/rides", ridesRouter);
   app.use("/ev-incentives", evIncentivesRouter);
   app.use("/sponsorships", sponsorshipsRouter);
@@ -24,6 +27,13 @@ export function createApp() {
   app.use("/advertising", advertisingRouter);
   app.use("/ad-consent", adConsentRouter);
   app.use("/therapy-rides", therapyRidesRouter);
+
+  // Minimal rider/driver web MVPs (plain HTML/JS, no build step — see
+  // web/README.md). Served from the same origin as the API so they can call
+  // it with plain fetch() and no CORS configuration.
+  app.use("/rider", express.static(path.join(__dirname, "..", "web", "rider")));
+  app.use("/driver", express.static(path.join(__dirname, "..", "web", "driver")));
+  app.use("/", express.static(path.join(__dirname, "..", "web")));
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

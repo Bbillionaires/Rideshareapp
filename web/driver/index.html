@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RideshareApp — Driver</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 24px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; }
+  section { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 0.85rem; color: #555; margin-top: 10px; }
+  input, select, button { font-size: 1rem; padding: 8px; margin-top: 4px; width: 100%; box-sizing: border-box; }
+  button { cursor: pointer; background: #1a73e8; color: white; border: none; border-radius: 6px; margin-top: 12px; }
+  button.secondary { background: #e0e0e0; color: #1a1a1a; }
+  button.danger { background: #b02a37; }
+  button:disabled { background: #ccc; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; }
+  .row > div { flex: 1; }
+  .pill { display: inline-block; padding: 4px 10px; border-radius: 6px; font-weight: 600; }
+  .online { background: #d1e7dd; }
+  .offline { background: #f8d7da; }
+  .ride-card { border: 1px solid #eee; border-radius: 8px; padding: 10px; margin-top: 8px; }
+  .muted { color: #777; font-size: 0.85rem; }
+  .error { color: #b02a37; font-size: 0.9rem; }
+  a { color: #1a73e8; }
+</style>
+</head>
+<body>
+  <h1>🧑‍✈️ Driver app <span class="muted">(test mode)</span></h1>
+  <p><a href="/">← back</a></p>
+
+  <section id="auth-section">
+    <h3>Driver identity</h3>
+    <p class="muted">No login in this MVP — create or paste a test Driver ID.</p>
+    <div class="row">
+      <div><label>Name</label><input id="driver-name" placeholder="Test Driver" /></div>
+      <div><label>Email</label><input id="driver-email" placeholder="driver@test.example" /></div>
+    </div>
+    <button id="create-driver-btn">Create test driver</button>
+    <label>…or use an existing Driver ID</label>
+    <input id="existing-driver-id" placeholder="paste a driverId" />
+    <button class="secondary" id="use-driver-btn">Use this driver</button>
+    <p class="error" id="auth-error"></p>
+  </section>
+
+  <section id="app-section" style="display:none">
+    <p>Signed in as <strong id="driver-label"></strong> <button class="secondary" style="width:auto;margin-left:8px;padding:4px 10px" id="signout-btn">switch driver</button></p>
+
+    <h3>Vehicle</h3>
+    <div id="vehicle-section"></div>
+
+    <h3>Presence</h3>
+    <p id="presence-pill" class="pill offline">OFFLINE</p>
+    <div class="row">
+      <div><label>Market</label><select id="market-select"></select></div>
+      <div><label>Vehicle</label><select id="vehicle-select"></select></div>
+    </div>
+    <button id="go-online-btn">Go online</button>
+    <button class="danger" id="go-offline-btn" style="display:none">Go offline</button>
+    <p class="error" id="presence-error"></p>
+
+    <h3>Available rides</h3>
+    <div id="available-rides"><p class="muted">Go online to see ride requests.</p></div>
+
+    <h3>Active ride</h3>
+    <div id="active-ride"><p class="muted">No active ride.</p></div>
+  </section>
+
+<script>
+const state = {
+  driverId: localStorage.getItem("rideshare.driverId") || null,
+  driverName: localStorage.getItem("rideshare.driverName") || null,
+  activeRideId: localStorage.getItem("rideshare.activeRideId") || null,
+  online: false,
+  pollTimer: null,
+};
+
+function $(id) { return document.getElementById(id); }
+
+async function api(path, options) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options && options.headers) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+  return body;
+}
+
+function money(cents) {
+  if (cents === null || cents === undefined) return "—";
+  return "$" + (cents / 100).toFixed(2);
+}
+
+function saveDriver(id, name) {
+  state.driverId = id;
+  state.driverName = name;
+  localStorage.setItem("rideshare.driverId", id);
+  localStorage.setItem("rideshare.driverName", name || "");
+}
+
+function clearDriver() {
+  state.driverId = null;
+  state.activeRideId = null;
+  localStorage.removeItem("rideshare.driverId");
+  localStorage.removeItem("rideshare.driverName");
+  localStorage.removeItem("rideshare.activeRideId");
+}
+
+async function loadMarkets() {
+  const markets = await api("/accounts/markets");
+  $("market-select").innerHTML = markets.map((m) => `<option value="${m.id}">${m.name}</option>`).join("");
+}
+
+async function loadVehicles() {
+  const vehicles = await api(`/accounts/drivers/${state.driverId}/vehicles`);
+  $("vehicle-select").innerHTML =
+    '<option value="">(none)</option>' +
+    vehicles.map((v) => `<option value="${v.id}">${v.year} ${v.make} ${v.model} — ${v.fuelType}</option>`).join("");
+  $("vehicle-section").innerHTML = vehicles.length
+    ? vehicles.map((v) => `<p>🚙 ${v.year} ${v.make} ${v.model} (${v.fuelType}, plate ${v.plate})</p>`).join("")
+    : '<p class="muted">No vehicle yet — add one below.</p>';
+  $("vehicle-section").innerHTML += `
+    <div class="row">
+      <div><label>Make</label><input id="v-make" placeholder="Tesla" /></div>
+      <div><label>Model</label><input id="v-model" placeholder="Model 3" /></div>
+    </div>
+    <div class="row">
+      <div><label>Year</label><input id="v-year" placeholder="2023" /></div>
+      <div><label>Plate</label><input id="v-plate" placeholder="ABC-1234" /></div>
+      <div><label>Fuel type</label>
+        <select id="v-fuel"><option value="EV">EV</option><option value="HYBRID">Hybrid</option><option value="PHEV">PHEV</option><option value="GAS">Gas</option></select>
+      </div>
+    </div>
+    <button class="secondary" id="add-vehicle-btn">Add vehicle</button>
+    <p class="error" id="vehicle-error"></p>
+  `;
+  $("add-vehicle-btn").addEventListener("click", addVehicle);
+}
+
+async function addVehicle() {
+  $("vehicle-error").textContent = "";
+  try {
+    await api("/accounts/vehicles", {
+      method: "POST",
+      body: JSON.stringify({
+        driverId: state.driverId,
+        marketId: $("market-select").value,
+        make: $("v-make").value.trim(),
+        model: $("v-model").value.trim(),
+        year: Number($("v-year").value),
+        plate: $("v-plate").value.trim(),
+        fuelType: $("v-fuel").value,
+      }),
+    });
+    loadVehicles();
+  } catch (e) {
+    $("vehicle-error").textContent = e.message;
+  }
+}
+
+async function refreshPresence() {
+  const status = await api(`/accounts/drivers/${state.driverId}/status`);
+  state.online = status.online;
+  $("presence-pill").textContent = status.online ? "ONLINE" : "OFFLINE";
+  $("presence-pill").className = "pill " + (status.online ? "online" : "offline");
+  $("go-online-btn").style.display = status.online ? "none" : "block";
+  $("go-offline-btn").style.display = status.online ? "block" : "none";
+  if (status.online) {
+    refreshAvailableRides();
+  } else {
+    $("available-rides").innerHTML = '<p class="muted">Go online to see ride requests.</p>';
+  }
+}
+
+async function refreshAvailableRides() {
+  if (!state.online || state.activeRideId) {
+    $("available-rides").innerHTML = state.activeRideId
+      ? '<p class="muted">Finish your active ride first.</p>'
+      : '<p class="muted">No rides available.</p>';
+    return;
+  }
+  const marketId = $("market-select").value;
+  const rides = await api(`/rides?status=REQUESTED&marketId=${marketId}`);
+  if (!rides.length) {
+    $("available-rides").innerHTML = '<p class="muted">No ride requests right now.</p>';
+    return;
+  }
+  $("available-rides").innerHTML = rides
+    .map(
+      (r) => `<div class="ride-card">
+        <p>Ride <code>${r.id}</code> — requested ${new Date(r.requestedAt).toLocaleTimeString()}</p>
+        <button style="width:auto;padding:6px 14px" onclick="acceptRide('${r.id}')">Accept</button>
+      </div>`
+    )
+    .join("");
+}
+
+window.acceptRide = async function (rideId) {
+  const vehicleId = $("vehicle-select").value || undefined;
+  await api(`/rides/${rideId}/accept`, {
+    method: "POST",
+    body: JSON.stringify({ driverId: state.driverId, vehicleId }),
+  });
+  state.activeRideId = rideId;
+  localStorage.setItem("rideshare.activeRideId", rideId);
+  refreshActiveRide();
+  refreshAvailableRides();
+};
+
+function renderActiveRide(ride) {
+  if (!ride) return '<p class="muted">No active ride.</p>';
+  let html = `<div class="ride-card"><p>Ride <code>${ride.id}</code> — <strong>${ride.status}</strong></p>`;
+  if (ride.status === "ACCEPTED") {
+    html += `<button style="width:auto;padding:6px 14px" onclick="startRide('${ride.id}')">Start ride</button>`;
+  } else if (ride.status === "IN_PROGRESS") {
+    html += `
+      <div class="row">
+        <div><label>Distance (miles)</label><input id="complete-distance" value="5" /></div>
+        <div><label>Duration (minutes)</label><input id="complete-duration" value="15" /></div>
+      </div>
+      <button style="width:auto;padding:6px 14px" onclick="completeRide('${ride.id}')">Complete ride</button>`;
+  } else if (ride.status === "COMPLETED") {
+    const earnings = (ride.earningsLines || []).reduce((sum, l) => sum + l.amountCents, 0);
+    const payment = (ride.payments || [])[0];
+    html += `<p>Your earnings: ${money(earnings)}</p>`;
+    html += payment
+      ? `<p>Rider payment: <strong>${payment.status}</strong> via ${payment.method}</p>`
+      : `<p class="muted">No payment on file (Stripe not configured — see README).</p>`;
+    html += `<button class="secondary" style="width:auto;padding:6px 14px" onclick="clearActiveRide()">Dismiss</button>`;
+  }
+  html += "</div>";
+  return html;
+}
+
+async function refreshActiveRide() {
+  if (!state.activeRideId) {
+    $("active-ride").innerHTML = '<p class="muted">No active ride.</p>';
+    return;
+  }
+  const ride = await api(`/rides/${state.activeRideId}`);
+  $("active-ride").innerHTML = renderActiveRide(ride);
+}
+
+window.startRide = async function (rideId) {
+  await api(`/rides/${rideId}/start`, { method: "POST" });
+  refreshActiveRide();
+};
+
+window.completeRide = async function (rideId) {
+  const distanceMiles = Number($("complete-distance").value) || 0;
+  const durationMinutes = Number($("complete-duration").value) || 0;
+  await api(`/rides/${rideId}/complete`, {
+    method: "POST",
+    body: JSON.stringify({ distanceMiles, durationMinutes }),
+  });
+  refreshActiveRide();
+};
+
+window.clearActiveRide = function () {
+  state.activeRideId = null;
+  localStorage.removeItem("rideshare.activeRideId");
+  $("active-ride").innerHTML = '<p class="muted">No active ride.</p>';
+  refreshAvailableRides();
+};
+
+$("go-online-btn").addEventListener("click", async () => {
+  $("presence-error").textContent = "";
+  try {
+    await api(`/accounts/drivers/${state.driverId}/online`, {
+      method: "POST",
+      body: JSON.stringify({ marketId: $("market-select").value, vehicleId: $("vehicle-select").value || undefined }),
+    });
+    refreshPresence();
+  } catch (e) {
+    $("presence-error").textContent = e.message;
+  }
+});
+
+$("go-offline-btn").addEventListener("click", async () => {
+  $("presence-error").textContent = "";
+  try {
+    await api(`/accounts/drivers/${state.driverId}/offline`, { method: "POST" });
+    refreshPresence();
+  } catch (e) {
+    $("presence-error").textContent = e.message;
+  }
+});
+
+function startPolling() {
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(() => {
+    refreshPresence();
+    refreshActiveRide();
+  }, 3000);
+}
+
+async function showApp() {
+  $("auth-section").style.display = "none";
+  $("app-section").style.display = "block";
+  $("driver-label").textContent = `${state.driverName || "driver"} (${state.driverId})`;
+  await loadMarkets();
+  await loadVehicles();
+  await refreshPresence();
+  await refreshActiveRide();
+  startPolling();
+}
+
+function showAuth() {
+  $("auth-section").style.display = "block";
+  $("app-section").style.display = "none";
+  if (state.pollTimer) clearInterval(state.pollTimer);
+}
+
+$("create-driver-btn").addEventListener("click", async () => {
+  $("auth-error").textContent = "";
+  try {
+    const name = $("driver-name").value.trim() || "Test Driver";
+    const email = $("driver-email").value.trim() || `driver-${Date.now()}@test.example`;
+    const driver = await api("/accounts/drivers", { method: "POST", body: JSON.stringify({ name, email }) });
+    saveDriver(driver.id, driver.name);
+    showApp();
+  } catch (e) {
+    $("auth-error").textContent = e.message;
+  }
+});
+
+$("use-driver-btn").addEventListener("click", async () => {
+  $("auth-error").textContent = "";
+  try {
+    const id = $("existing-driver-id").value.trim();
+    if (!id) return;
+    const driver = await api(`/accounts/drivers/${id}`);
+    saveDriver(driver.id, driver.name);
+    showApp();
+  } catch (e) {
+    $("auth-error").textContent = e.message;
+  }
+});
+
+$("signout-btn").addEventListener("click", () => {
+  clearDriver();
+  showAuth();
+});
+
+if (state.driverId) {
+  showApp();
+} else {
+  showAuth();
+}
+</script>
+</body>
+</html>
